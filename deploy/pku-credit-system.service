@@ -1,0 +1,20 @@
+[Unit]
+Description=PKU Youth League Training Credit System
+After=network.target
+
+[Service]
+Type=simple
+User=pkucredits
+WorkingDirectory=/opt/pku-credit-system
+Environment=NODE_ENV=production
+Environment=PORT=8787
+Environment=COOKIE_SECURE=true
+EnvironmentFile=-/etc/pku-credit-system.env
+ExecStart=/usr/bin/node /opt/pku-credit-system/server.mjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
