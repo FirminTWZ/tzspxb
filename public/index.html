@@ -168,10 +168,35 @@
       <div class="account-form-actions"><button class="primary">保存账号</button> <button class="ghost" type="button" id="account-cancel">取消</button></div>
     </form>
   </details>
+  <details id="liaison-permissions" class="account-editor">
+    <summary>小组联络员出勤权限</summary>
+    <form id="liaison-permission-form" class="account-form">
+      <label>设置范围<select name="target"><option value="accounts">所选联络员账号</option><option value="cohort">整个培训班/团校</option></select></label>
+      <label id="liaison-policy-cohort-field" class="hidden">培训班/团校<select name="cohortId"></select></label>
+      <label>出勤权限<select name="mode"><option value="inherit">沿用培训班/团校设置</option><option value="readonly">仅查看</option><option value="legacy">仅登记必修补修（原权限）</option><option value="custom">自定义出勤权限</option></select></label>
+      <fieldset id="liaison-custom-policy" class="liaison-custom-policy hidden">
+        <legend>允许将课程状态更改为</legend>
+        <div class="liaison-statuses">
+          <label class="inline-check"><input type="checkbox" name="statuses" value="attended">现场出勤</label>
+          <label class="inline-check"><input type="checkbox" name="statuses" value="makeup">完成补修</label>
+          <label class="inline-check"><input type="checkbox" name="statuses" value="">未参加</label>
+        </div>
+        <label>课程范围<select name="scope"><option value="required">仅必修课程</option><option value="all">必修和选修课程</option></select></label>
+      </fieldset>
+      <p id="liaison-policy-summary" class="muted liaison-policy-summary" role="status"></p>
+      <div class="account-form-actions"><button class="primary" type="submit">保存出勤权限</button></div>
+    </form>
+  </details>
   <div class="account-filters">
     <label>搜索账号<input id="account-search" type="search" placeholder="输入账号名称"></label>
     <label>角色<select id="account-role-filter"><option value="">所有角色</option><option value="super">校团委组织部</option><option value="org">校团委组织部骨干</option><option value="liaison">小组联络员</option></select></label>
     <label>培训班/团校<select id="account-cohort-filter"><option value="">不限培训班/团校</option></select></label>
+  </div>
+  <div class="account-actions liaison-selection">
+    <button class="ghost" id="select-visible-liaisons" type="button">选中当前列表的联络员</button>
+    <button class="ghost" id="clear-liaison-selection" type="button">取消选择</button>
+    <button class="secondary" id="edit-selected-liaisons" type="button">设置所选账号权限</button>
+    <span class="muted" id="liaison-selection-count" role="status"></span>
   </div>
   <p class="muted account-result-count" id="account-result-count" role="status"></p>
   <div id="account-list" class="account-list"></div>
@@ -180,7 +205,7 @@
 
 <dialog id="student-dialog"><form method="dialog" id="student-form"><div class="dialog-head"><div><h2>学员信息</h2><p>带星号的信息用于前台身份核对。</p></div><button class="icon-btn" value="cancel">×</button></div><div class="form-grid"><label>姓名 *<input name="name" required></label><label>院系 *<input name="department" required></label><label>学员类型 *<select name="studentType"><option value="undergraduate">本科生</option><option value="graduate">硕博生</option></select></label><label>组别<input name="groupName"></label><label>小组联络员<input name="groupContact"></label><label>政治面貌<input name="politicalStatus"></label><label class="span-2">所属团支部<input name="leagueBranch"></label><label>手机<input name="phone"></label><label>电子邮箱<input name="email"></label><label class="span-2 inline-check"><input type="checkbox" name="withdrawn">已退出／休学（不计入统计人数）</label><label class="span-2">退出备注<input name="withdrawalNote"></label></div><div class="dialog-actions"><button class="ghost" value="cancel">取消</button><button class="primary" type="submit" value="default">保存</button></div></form></dialog>
 <dialog id="course-dialog"><form method="dialog" id="course-form"><input type="hidden" name="id"><div class="dialog-head"><div><h2>课程设置</h2><p>修改学分会同步影响所有已参加该课程的学员。</p></div><button class="icon-btn" value="cancel">×</button></div><div class="form-grid"><label class="span-2">课程名称<input name="name" required></label><label>课程类别<select name="category"><option value="required">必修课程</option><option value="elective">选修课程</option></select></label><label>课程学分<input name="credits" type="number" min="0" step="0.5" required></label><label>显示顺序<input name="sortOrder" type="number" min="0" required></label></div><div class="dialog-actions"><button class="ghost" value="cancel">取消</button><button class="primary" type="submit" value="default">保存</button></div></form></dialog>
-<dialog id="attendance-dialog" class="wide-dialog"><form method="dialog" id="attendance-form"><input type="hidden" name="studentId"><div class="dialog-head"><div><h2 id="attendance-title">学员课程记录</h2><p>选择未参加、现场出勤、完成补修或特殊课程。</p></div><button class="icon-btn" value="cancel">×</button></div><div id="attendance-list" class="attendance-list"></div><div class="dialog-actions"><button class="ghost" value="cancel">取消</button><button class="primary" type="submit" value="default">保存课程记录</button></div></form></dialog>
+<dialog id="attendance-dialog" class="wide-dialog"><form method="dialog" id="attendance-form"><input type="hidden" name="studentId"><div class="dialog-head"><div><h2 id="attendance-title">学员课程记录</h2><p id="attendance-policy-description"></p></div><button class="icon-btn" value="cancel">×</button></div><div id="attendance-list" class="attendance-list"></div><div class="dialog-actions"><button class="ghost" value="cancel">取消</button><button class="primary" type="submit" value="default">保存课程记录</button></div></form></dialog>
 <dialog id="check-in-dialog" class="wide-dialog" aria-labelledby="check-in-title">
   <form id="check-in-form" class="check-in-form">
     <div class="dialog-head"><div><h2 id="check-in-title">名单签到</h2><p id="check-in-course"></p></div></div>

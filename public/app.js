@@ -1,5 +1,7 @@
+import { attendanceOptions, attendanceStatuses, legacyAttendancePolicy } from "./attendance-policy.js";
+
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-let data=null, editingStudent=null, accountsData=null;
+let data=null, editingStudent=null, accountsData=null, dashboardVersion=0;
 const completionStyle=document.createElement("style");completionStyle.textContent=".completion-box{margin:22px 0 4px;padding:18px 20px;background:#faf7f7;border:1px solid #eadcdf;border-radius:12px}.completion-summary{display:flex;align-items:center;justify-content:space-between;gap:18px;font-size:.95rem}.required-earned{color:var(--muted);text-align:right}.required-earned strong{color:var(--ink);font-size:1.05rem}.completion-requirement{margin-top:15px;padding-top:14px;border-top:1px solid #eadcdf;color:var(--red);font-size:1rem;letter-spacing:.01em}@media(max-width:520px){.completion-box{padding:16px}.completion-summary{align-items:flex-start;flex-direction:column;gap:10px}.required-earned{text-align:left}.completion-requirement{line-height:1.8}}";document.head.append(completionStyle);
 $(".admin-tabs").insertAdjacentHTML("beforeend",'<button class="tab-btn" data-tab="cohorts">培训班/团校管理</button>');
 $("#dashboard").insertAdjacentHTML("beforeend",'<section class="panel tab-panel hidden" id="tab-cohorts"><div class="panel-head"><div><h2>培训班/团校管理</h2><p>新增培训班/团校，或修改现有名称。</p></div></div><form id="cohort-form" class="cohort-form"><input type="hidden" name="id"><label>培训班/团校名称<input name="name" maxlength="100" required placeholder="例如：北京大学2026级团支书培训班"></label><button class="primary">保存名称</button><button class="ghost hidden" type="button" id="cohort-cancel">取消编辑</button></form><div id="cohort-list" class="cohort-list"></div></section>');
@@ -136,9 +138,12 @@ $("#query-form").onsubmit=async e=>{e.preventDefault();const form=e.currentTarge
 $("#login-form").onsubmit=async event=>{
   event.preventDefault();
   const form=event.currentTarget;
+  const submit=form.querySelector("button[type=submit],button.primary");
+  submit.disabled=true;
   showAuthMessage("");
   try {
     const result=await request("/api/admin/login",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(form)))});
+    dashboardVersion++;
     data=result.dashboard;
     $("#admin-login").classList.add("hidden");
     $("#dashboard").classList.remove("hidden");
@@ -148,9 +153,25 @@ $("#login-form").onsubmit=async event=>{
     toast("登录成功");
   } catch (error) {
     showAuthMessage(error.message,true);
+  } finally {
+    submit.disabled=false;
   }
 };
-async function loadDashboard(){try{data=await request("/api/admin/dashboard");$("#admin-login").classList.add("hidden");$("#dashboard").classList.remove("hidden");render()}catch(err){if(err.status===401){data=null;$("#admin-login").classList.remove("hidden");$("#dashboard").classList.add("hidden")}else toast(err.message)}}
+async function loadDashboard() {
+  const version=++dashboardVersion;
+  try {
+    const result=await request("/api/admin/dashboard");
+    if (version!==dashboardVersion) return;
+    data=result;
+    $("#admin-login").classList.add("hidden");
+    $("#dashboard").classList.remove("hidden");
+    render();
+  } catch(error) {
+    if (version!==dashboardVersion) return;
+    if (error.status===401) showSignedOut();
+    else toast(error.message);
+  }
+}
 function card(label,s,status="结业"){return`<div class="stat-card"><span class="label">${label}</span><div class="metric"><strong>${s.rate}%</strong><small>${s.passed}/${s.count} 人${status}<br>平均 ${s.average} 学分</small></div></div>`}
 function render(){const s=data.stats;$(".dash-head p").textContent=`${data.cohort?.name||"培训班/团校管理"} · ${data.user.roleName}`;$("#stat-grid").innerHTML=card("总体结业率（满足必修）",s.total)+card("本科生结业率（满足必修）",s.undergraduate)+card("硕博生结业率（满足必修）",s.graduate);$("#settings-form").elements.undergraduate.value=data.thresholds.undergraduate;$("#settings-form").elements.graduate.value=data.thresholds.graduate;$("#settings-form").elements.required.value=data.thresholds.required;$("#accounts-tab-btn").classList.toggle("hidden",!data.user.canManageAccounts);$$('#tab-courses,#tab-settings,#tab-cohorts').forEach(x=>x.classList.toggle('role-hidden',!data.user.canEdit));$$('.tab-btn[data-tab="courses"],.tab-btn[data-tab="settings"],.tab-btn[data-tab="cohorts"]').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$$('#new-student-btn,#template-download,#export-download,.file-btn').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$("#type-chart").innerHTML=`<div class="chart-row"><div class="chart-label"><span>本科生</span><strong>${s.undergraduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.undergraduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><div class="chart-row"><div class="chart-label"><span>硕博生</span><strong>${s.graduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.graduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><p class="muted">另有 ${s.withdrawn} 人已退出／休学，未计入以上人数。</p>`;renderStudents();renderCourses();renderCohorts()}
 function renderStudents(){const q=$("#student-search").value.trim().toLowerCase(),show=$("#show-withdrawn").checked;const rows=data.records.filter(r=>(show||!r.withdrawn)&&(!q||[r.name,r.department,r.groupName,r.groupContact].some(x=>String(x).toLowerCase().includes(q))));$("#student-count").textContent=`显示 ${rows.length} / ${data.records.length} 人`;$("#students-body").innerHTML=rows.length?rows.map(r=>`<tr class="${r.withdrawn?'withdrawn-row':''}"><td><strong>${esc(r.name)}</strong></td><td>${esc(r.department)}</td><td>${esc(r.groupName||'—')}</td><td>${typeName(r.studentType)}</td><td><strong>${r.totalCredits}</strong></td><td>${r.requiredCredits}</td><td>${r.courseCount}</td><td><span class="status ${r.withdrawn?'pending':'pass'}">${r.withdrawn?'已退出／休学':'在班'}</span></td><td><span class="status ${r.completed?'pass':'pending'}">${r.completed?'已结业':'未结业'}</span></td><td class="row-actions"><button class="small-btn primary-link" data-attendance="${r.id}">课程记录</button>${data.user.canEdit?`<button class="small-btn" data-edit-student="${r.id}">编辑</button>`:''}</td></tr>`).join(""):'<tr><td colspan="10" class="empty-cell">暂无匹配学员</td></tr>'}
@@ -175,18 +196,120 @@ $("#cohort-list").onclick=e=>{const id=Number(e.target.dataset.editCohort);if(!i
 $("#cohort-cancel").onclick=()=>{$("#cohort-form").reset();$("#cohort-form").elements.id.value="";$("#cohort-cancel").classList.add("hidden");renderCohorts()};
 $("#cohort-form").onsubmit=async e=>{e.preventDefault();try{await request("/api/admin/cohorts",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(e.currentTarget)))});e.currentTarget.reset();$("#cohort-cancel").classList.add("hidden");await loadMeta();if(data?.cohort)await loadDashboard();toast("培训班/团校已保存")}catch(err){toast(err.message)}};
 $("#student-search").oninput=renderStudents;$("#show-withdrawn").onchange=renderStudents;
-$("#logout-btn").onclick=async()=>{await request("/api/admin/logout",{method:"POST",body:"{}"});data=null;$("#dashboard").classList.add("hidden");$("#admin-login").classList.remove("hidden")};
+function showSignedOut() {
+  dashboardVersion++;
+  data=null;
+  accountsData=null;
+  selectedLiaisonIds.clear();
+  permissionForm.reset();
+  $("#liaison-permissions").open=false;
+  $("#account-list").replaceChildren();
+  $("#registration-list").replaceChildren();
+  $("#registration-count").textContent="";
+  resetAccountEditor();
+  for (const dialog of $$("dialog[open]")) dialog.close();
+  $("#dashboard").classList.add("hidden");
+  $("#admin-login").classList.remove("hidden");
+}
+$("#logout-btn").onclick=async()=>{
+  try {
+    await request("/api/admin/logout",{method:"POST",body:"{}"});
+    showSignedOut();
+  } catch(error) {
+    toast(error.message);
+  }
+};
 
 function openStudent(r=null){editingStudent=r;const f=$("#student-form");f.reset();if(r)for(const [k,v]of Object.entries(r)){if(f.elements[k]){if(f.elements[k].type==="checkbox")f.elements[k].checked=!!v;else f.elements[k].value=v??""}}$("#student-dialog").showModal()}
 $("#new-student-btn").onclick=()=>openStudent();$("#students-body").onclick=async e=>{const edit=e.target.dataset.editStudent,att=e.target.dataset.attendance;if(edit)openStudent(data.records.find(r=>r.id===Number(edit)));if(att)openAttendance(Number(att))};
-$("#student-form").onsubmit=async e=>{e.preventDefault();if(e.submitter?.value==="cancel")return $("#student-dialog").close();const o=Object.fromEntries(new FormData(e.currentTarget));o.withdrawn=e.currentTarget.elements.withdrawn.checked;try{await request("/api/admin/students",{method:"POST",body:JSON.stringify(o)});$("#student-dialog").close();await loadDashboard();await loadMeta();toast("学员信息已保存")}catch(err){toast(err.message)}};
+$("#student-form").onsubmit=async e=>{e.preventDefault();if(e.submitter?.value==="cancel")return $("#student-dialog").close();const o=Object.fromEntries(new FormData(e.currentTarget));o.withdrawn=e.currentTarget.elements.withdrawn.checked;if(editingStudent)o.id=editingStudent.id;try{await request("/api/admin/students",{method:"POST",body:JSON.stringify(o)});$("#student-dialog").close();await loadDashboard();await loadMeta();toast("学员信息已保存")}catch(err){toast(err.message)}};
 
 function openCourse(c=null){const f=$("#course-form");f.reset();f.elements.sortOrder.value=c?.sortOrder??data.courses.length+1;if(c)for(const[k,v]of Object.entries(c))if(f.elements[k])f.elements[k].value=v??"";$("#course-dialog").showModal()}
 $("#new-course-btn").onclick=()=>openCourse();$("#courses-body").onclick=async e=>{const edit=e.target.dataset.editCourse,del=e.target.dataset.deleteCourse,roster=e.target.dataset.courseRoster;if(edit)openCourse(data.courses.find(c=>c.id===Number(edit)));if(roster)openCourseRoster(Number(roster));if(del&&confirm("停用后，该课程不再计入任何学员总学分。确定继续吗？")){await request(`/api/admin/courses/${del}`,{method:"DELETE"});await loadDashboard();toast("课程已停用")}};
 $("#course-form").onsubmit=async e=>{e.preventDefault();if(e.submitter?.value==="cancel")return $("#course-dialog").close();try{await request("/api/admin/courses",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(e.currentTarget)))});$("#course-dialog").close();await loadDashboard();toast("课程已保存")}catch(err){toast(err.message)}};
-async function openAttendance(id){try{const r=await request(`/api/admin/students/${id}`);$("#attendance-form").elements.studentId.value=id;$("#attendance-title").textContent=`${r.student.name}的课程记录`;$("#attendance-list").innerHTML=r.attendance.map(a=>`<div class="attendance-row" data-course="${a.courseId}"><div><strong>${esc(a.name)}</strong><small>${categoryName(a.category)} · 标准 ${a.credits} 学分</small></div><select ${data.user.canEdit?'':'disabled'}><option value="" ${!a.status?'selected':''}>未参加</option><option value="attended" ${a.status==='attended'?'selected':''}>现场出勤</option><option value="makeup" ${a.status==='makeup'?'selected':''}>完成补修</option><option value="special" ${a.status==='special'?'selected':''}>特殊课程（8学分）</option></select><strong>${a.status==='special'?8:a.status?a.credits:0} 分</strong></div>`).join("");$("#attendance-form button[type='submit']").classList.toggle("hidden",!data.user.canEdit);$("#attendance-dialog").showModal()}catch(err){toast(err.message)}}
-$("#attendance-list").onchange=e=>{const row=e.target.closest(".attendance-row"),course=data.courses.find(c=>c.id===Number(row.dataset.course));row.querySelector(":scope>strong").textContent=`${e.target.value==='special'?8:e.target.value?course.credits:0} 分`};
-$("#attendance-form").onsubmit=async e=>{e.preventDefault();if(e.submitter?.value==="cancel")return $("#attendance-dialog").close();const items=$$("#attendance-list .attendance-row").map(r=>({courseId:Number(r.dataset.course),status:r.querySelector("select").value}));try{await request("/api/admin/attendance",{method:"POST",body:JSON.stringify({studentId:Number(e.currentTarget.elements.studentId.value),items})});$("#attendance-dialog").close();await loadDashboard();toast("课程记录已保存")}catch(err){toast(err.message)}};
+function availableAttendanceStatuses(policy, category, status, withdrawn) {
+  const allowed=attendanceOptions(policy,category,status,withdrawn);
+  return [status,...allowed.filter(value=>value!==status)];
+}
+
+function attendanceSelect(choices, status, name) {
+  return `<select aria-label="${esc(name)}" ${choices.length===1?"disabled":""}>${choices.map(value=>
+    `<option value="${value}" ${value===status?"selected":""}>${statusName(value)}${value==="special"?"（8学分）":""}</option>`
+  ).join("")}</select>`;
+}
+
+function earnedCredits(status, credits, override=null) {
+  return status==="special"?(override??8):status?(override??credits):0;
+}
+
+function changedAttendanceRows(container, idField) {
+  return [...container.querySelectorAll(".attendance-row")].map(row=>({
+    [idField]:Number(row.dataset[idField]),
+    expectedStatus:row.dataset.originalStatus,
+    status:row.querySelector("select").value
+  })).filter(item=>item.status!==item.expectedStatus);
+}
+
+async function saveAttendanceChanges(event, path, payload, dialog, success) {
+  const button=event.currentTarget.querySelector("[type=submit]");
+  if (!payload.items.length) {
+    toast("没有需要保存的出勤修改");
+    return;
+  }
+  button.disabled=true;
+  try {
+    await request(path,{method:"POST",body:JSON.stringify(payload)});
+    dialog.close();
+    await loadDashboard();
+    toast(success);
+  } catch(error) {
+    toast(error.message);
+  } finally {
+    button.disabled=false;
+  }
+}
+
+async function openAttendance(id) {
+  try {
+    const record=await request("/api/admin/students/"+id);
+    const form=$("#attendance-form"), policy=record.attendancePolicy;
+    form.elements.studentId.value=id;
+    $("#attendance-title").textContent=record.student.name+"的课程记录";
+    $("#attendance-policy-description").textContent=policyDescription(policy);
+    let editable=false;
+    $("#attendance-list").innerHTML=record.attendance.map(course=>{
+      const status=course.status??"";
+      const choices=availableAttendanceStatuses(policy,course.category,status,record.student.withdrawn);
+      if (choices.length>1) editable=true;
+      return `<div class="attendance-row" data-course-id="${course.courseId}" data-original-status="${status}"
+          data-credits="${course.credits}" data-credit-override="${course.creditOverride??""}">
+        <div><strong>${esc(course.name)}</strong><small>${categoryName(course.category)} · 标准 ${course.credits} 学分</small></div>
+        ${attendanceSelect(choices,status,course.name+"的出勤状态")}
+        <strong>${earnedCredits(status,course.credits,course.creditOverride)} 分</strong>
+      </div>`;
+    }).join("");
+    form.querySelector("[type=submit]").classList.toggle("hidden",!editable);
+    $("#attendance-dialog").showModal();
+  } catch(error) {
+    toast(error.message);
+  }
+}
+
+function updateAttendanceCredits(event) {
+  if (event.target.tagName!=="SELECT") return;
+  const row=event.target.closest(".attendance-row"), status=event.target.value;
+  const override=status===row.dataset.originalStatus&&row.dataset.creditOverride!==""?Number(row.dataset.creditOverride):null;
+  row.querySelector(":scope>strong").textContent=earnedCredits(status,Number(row.dataset.credits),override)+" 分";
+}
+$("#attendance-list").onchange=updateAttendanceCredits;
+$("#attendance-form").onsubmit=event=>{
+  event.preventDefault();
+  const studentId=Number(event.currentTarget.elements.studentId.value);
+  const items=changedAttendanceRows($("#attendance-list"),"courseId");
+  return saveAttendanceChanges(event,"/api/admin/attendance",{studentId,items},$("#attendance-dialog"),"课程记录已保存");
+};
+
+
 $("#settings-form").onsubmit=async e=>{e.preventDefault();try{await request("/api/admin/settings",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(e.currentTarget)))});await loadDashboard();toast("结业标准已更新")}catch(err){toast(err.message)}};
 
 const roleName=v=>v==="super"?"校团委组织部":v==="org"?"校团委组织部骨干":"小组联络员";
@@ -208,13 +331,125 @@ function accountScope(account) {
   return "全部培训班/团校";
 }
 
+const permissionForm=$("#liaison-permission-form");
+const selectedLiaisonIds=new Set();
+
+function policyDescription(policy) {
+  if (policy.mode==="manager") return "可登记现场出勤、完成补修、未参加或特殊课程。";
+  if (policy.mode==="readonly") return "仅查看本组出勤。";
+  if (policy.mode==="legacy") return "仅可为本组未参加必修课的学员登记完成补修。";
+  const courses=policy.scope==="all"?"必修和选修课":"必修课";
+  return courses+"可登记为"+policy.statuses.map(statusName).join("、")+"。";
+}
+
+function setPolicyFields(policy) {
+  permissionForm.elements.mode.value=policy?.mode??"inherit";
+  permissionForm.elements.scope.value=policy?.scope??"required";
+  permissionForm.querySelectorAll("[name=statuses]").forEach(input=>{
+    input.checked=policy?.statuses?.includes(input.value)??false;
+  });
+  updatePermissionForm();
+}
+
+function updatePermissionForm() {
+  const {target,cohortId,mode}=permissionForm.elements;
+  const byCohort=target.value==="cohort";
+  $("#liaison-policy-cohort-field").classList.toggle("hidden",!byCohort);
+  cohortId.required=byCohort;
+  mode.querySelector('[value="inherit"]').disabled=byCohort;
+  $("#liaison-custom-policy").classList.toggle("hidden",mode.value!=="custom");
+  const paragraph=$("#liaison-policy-summary");
+  if (byCohort) {
+    const cohort=accountsData?.cohorts.find(item=>String(item.id)===cohortId.value);
+    paragraph.textContent=cohort
+      ? "当前整班设置："+policyDescription(cohort.attendancePolicy??legacyAttendancePolicy)+" 保存后覆盖该班所有联络员的单独设置，也适用于今后新增的联络员。"
+      : "请选择要统一设置出勤权限的培训班/团校。";
+  } else {
+    paragraph.textContent="已选 "+selectedLiaisonIds.size+" 个联络员账号，可在下方列表勾选。";
+  }
+  permissionForm.querySelector("[type=submit]").disabled=byCohort?!cohortId.value:!selectedLiaisonIds.size;
+  $("#liaison-selection-count").textContent="已选 "+selectedLiaisonIds.size+" 个联络员";
+  $("#edit-selected-liaisons").disabled=!selectedLiaisonIds.size;
+}
+
+function loadCohortPolicyFields() {
+  const cohort=accountsData?.cohorts.find(item=>String(item.id)===permissionForm.elements.cohortId.value);
+  setPolicyFields(cohort?.attendancePolicy??legacyAttendancePolicy);
+}
+permissionForm.elements.target.onchange=()=>{
+  if (permissionForm.elements.target.value==="cohort") loadCohortPolicyFields();
+  else setPolicyFields(null);
+};
+permissionForm.elements.cohortId.onchange=loadCohortPolicyFields;
+permissionForm.elements.mode.onchange=updatePermissionForm;
+updatePermissionForm();
+
+function editSelectedPolicy() {
+  permissionForm.elements.target.value="accounts";
+  const selected=accountsData?.accounts.find(account=>selectedLiaisonIds.has(account.id));
+  setPolicyFields(selectedLiaisonIds.size===1?selected?.attendancePolicy:null);
+  const editor=$("#liaison-permissions");
+  editor.open=true;
+  editor.scrollIntoView({block:"nearest"});
+  permissionForm.elements.mode.focus({preventScroll:true});
+}
+
+$("#select-visible-liaisons").onclick=()=>{
+  $$("#account-list [data-select-liaison]").forEach(input=>selectedLiaisonIds.add(Number(input.value)));
+  renderAccounts();
+};
+$("#clear-liaison-selection").onclick=()=>{
+  selectedLiaisonIds.clear();
+  renderAccounts();
+};
+$("#edit-selected-liaisons").onclick=editSelectedPolicy;
+$("#account-list").onchange=event=>{
+  const input=event.target.closest("[data-select-liaison]");
+  if (!input) return;
+  const id=Number(input.value);
+  if (input.checked) selectedLiaisonIds.add(id);
+  else selectedLiaisonIds.delete(id);
+  updatePermissionForm();
+};
+
+permissionForm.onsubmit=async event=>{
+  event.preventDefault();
+  const fields=new FormData(permissionForm), mode=fields.get("mode"), byCohort=fields.get("target")==="cohort";
+  const policy=mode==="inherit"?null:mode==="custom"
+    ?{mode,scope:fields.get("scope"),statuses:fields.getAll("statuses")}:{mode};
+  if (mode==="custom" && !policy.statuses.length) return toast("请至少勾选一种允许更改的出勤状态");
+  const cohort=accountsData?.cohorts.find(item=>String(item.id)===fields.get("cohortId"));
+  if (byCohort && (!cohort || !confirm("确定统一设置「"+cohort.name+"」所有联络员的出勤权限？原有单独设置将由整班设置取代。"))) return;
+  const accountIds=[...selectedLiaisonIds];
+  if (!byCohort && !accountIds.length) return toast("请先选择联络员账号");
+  const payload={attendancePolicy:policy,...(byCohort?{cohortId:cohort.id}:{accountIds})};
+  const submit=event.submitter;
+  submit.disabled=true;
+  try {
+    const result=await request("/api/admin/liaison-attendance",{method:"PATCH",body:JSON.stringify(payload)});
+    selectedLiaisonIds.clear();
+    await loadAccounts();
+    toast(byCohort
+      ?"整班权限已保存，适用于现有 "+result.updated+" 个联络员及以后新增的账号"
+      :"已更新 "+result.updated+" 个小组联络员的出勤权限");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    updatePermissionForm();
+  }
+};
+
 async function loadAccounts() {
+  const accountId=data?.user.id;
   const [accounts,registrations]=await Promise.allSettled([
     request("/api/admin/accounts"), request("/api/admin/registrations")
   ]);
-  if (!data?.user?.canManageAccounts) return;
+  if (!data?.user?.canManageAccounts || data.user.id!==accountId) return;
   if (accounts.status==="fulfilled") {
     accountsData=accounts.value;
+    const liaisonIds=new Set(accountsData.accounts.filter(account=>account.role==="liaison"&&account.active).map(account=>account.id));
+    for (const id of selectedLiaisonIds) if (!liaisonIds.has(id)) selectedLiaisonIds.delete(id);
+    setCohortOptions(permissionForm.elements.cohortId,accountsData.cohorts,"请选择培训班/团校");
     setCohortOptions($("#account-cohort"),accountsData.cohorts,"请选择培训班/团校",true);
     setScopeChoices($("#account-org-scope .cohort-choices"),accountsData.cohorts);
     const cohortFilter=$("#account-cohort-filter"), previous=cohortFilter.value;
@@ -222,6 +457,7 @@ async function loadAccounts() {
     cohortFilter.add(new Option("全部培训班/团校权限","global"));
     if (previous==="global") cohortFilter.value=previous;
     renderAccounts();
+    if (permissionForm.elements.target.value==="cohort") loadCohortPolicyFields();
   } else {
     $("#account-result-count").textContent=accounts.reason.message;
   }
@@ -246,13 +482,22 @@ function renderAccounts() {
   });
   $("#account-result-count").textContent=`显示 ${rows.length} / ${accountsData.accounts.length} 个账号`;
   $("#account-list").innerHTML=rows.map(account=>{
-    const mayDelete=account.id!==data.user.id && !["pkuzzb","zhangtongwei"].includes(account.username);
+    const mayDelete=account.id!==data.user.id && account.role!=="super";
+    const liaison=account.role==="liaison";
+    const policy=account.attendancePolicy??accountsData.cohorts.find(cohort=>cohort.id===account.cohortId)?.attendancePolicy??legacyAttendancePolicy;
+    const name=liaison&&account.active
+      ? '<label class="inline-check"><input type="checkbox" data-select-liaison value="'+account.id+'" '+(selectedLiaisonIds.has(account.id)?"checked":"")+'><strong>'+esc(account.username)+'</strong></label>'
+      : '<strong>'+esc(account.username)+'</strong>';
+    const summary=liaison?'<small class="account-policy-label">'+(account.attendancePolicy?"单独设置 · ":"沿用班级 · ")+esc(policyDescription(policy))+'</small>':"";
+    const policyButton=liaison&&account.active?'<button class="small-btn" data-edit-policy="'+account.id+'">出勤权限</button>':"";
     return `<div class="account-item">
-      <strong>${esc(account.username)}</strong><span>${roleName(account.role)}</span><span>${accountScope(account)}</span>
+      ${name}<span>${roleName(account.role)}</span><span>${accountScope(account)}${summary}</span>
       <div class="account-actions"><button class="small-btn" data-edit-account="${account.id}">编辑／改密</button>
+      ${policyButton}
       ${mayDelete?`<button class="delete-btn" data-delete-account="${account.id}">删除</button>`:""}</div>
     </div>`;
   }).join("") || '<p class="muted">没有符合条件的账号。</p>';
+  updatePermissionForm();
 }
 
 function renderRegistrations(registrations) {
@@ -324,10 +569,19 @@ $("#account-cancel").onclick=resetAccountEditor;
 resetAccountEditor();
 
 $("#account-list").onclick=async event=>{
+  const policy=Number(event.target.dataset.editPolicy);
+  if (policy) {
+    selectedLiaisonIds.clear();
+    selectedLiaisonIds.add(policy);
+    renderAccounts();
+    editSelectedPolicy();
+    return;
+  }
   const edit=Number(event.target.dataset.editAccount), remove=Number(event.target.dataset.deleteAccount);
   try {
     if (edit) {
       const account=accountsData.accounts.find(item=>item.id===edit);
+      if (!account) return toast("账号列表已更新，请重新选择");
       accountForm.reset();
       accountForm.elements.id.value=account.id;
       accountForm.elements.username.value=account.username;
@@ -373,7 +627,24 @@ function courseCredits(i){if(i===0)return 4;if(i===1)return 5;if(i===2)return 2;
 function parseWorkbook(wb){const sheets=wb.SheetNames.filter(n=>/本科|硕博/.test(n));if(!sheets.length)throw new Error("未找到本科组或硕博组工作表");let courses=[],students=[],attendance=[];for(const sn of sheets){const ws=wb.Sheets[sn],rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:null,raw:true}),headers=rows[0]||[];let end=9;while(end<headers.length&&headers[end]!=null&&String(headers[end]).trim())end++;const type=/本科/.test(sn)?"undergraduate":"graduate";if(!courses.length||end-9>courses.length)courses=Array.from({length:end-9},(_,i)=>({courseKey:`course_${String(i+1).padStart(2,"0")}`,name:canonicalName(i,headers[9+i]),category:i<=3?"required":"elective",credits:courseCredits(i),sortOrder:i+1,sourceHeader:String(headers[9+i]||"")}));let group="",contact="";for(let r=1;r<rows.length;r++){const row=rows[r];group=row[0]??group;contact=row[2]??contact;let name=String(row[3]??"").trim();if(!name)continue;const tail=row.slice(end).filter(v=>v!==null&&v!=="").map(String).join(" "),withdrawn=/休学|退出|退班/.test(name+" "+tail),withdrawalNote=(name.match(/[（(](休学|退出|退班)[）)]/)?.[1]||tail.match(/休学|退出|退班/)?.[0]||"");name=name.replace(/[（(](休学|退出|退班)[）)]/g,"").trim();let sourceTotal=null;for(let c=row.length-1;c>=end;c--)if(typeof row[c]==="number"&&Number.isFinite(row[c])){sourceTotal=row[c];break}const importKey=`${sn}:${r+1}`;students.push({importKey,name,department:String(row[5]??"").trim(),studentType:type,groupName:String(group??"").trim(),groupContact:String(contact??"").trim(),politicalStatus:String(row[4]??"").trim(),leagueBranch:String(row[6]??"").trim(),phone:String(row[7]??"").trim(),email:String(row[8]??"").trim(),withdrawn,withdrawalNote,sourceTotal,note:tail});for(let i=0;i<end-9;i++){const v=row[9+i];if(v==null||v==="")continue;const n=Number(v),status=Math.abs(n-1)<.01?"attended":Math.abs(n-2)<.01?"makeup":"special";attendance.push({studentKey:importKey,courseKey:`course_${String(i+1).padStart(2,"0")}`,status,sourceMark:String(v)})}}}return{students,courses,attendance}}
 $("#full-excel-input").onchange=async e=>{const file=e.target.files[0];e.target.value="";if(!file)return;try{const wb=XLSX.read(await file.arrayBuffer(),{type:"array"}),payload=parseWorkbook(wb);if(!confirm(`将导入 ${payload.students.length} 名学员、${payload.courses.length} 门课程和 ${payload.attendance.length} 条出勤记录。继续吗？`))return;const r=await request("/api/admin/import-full",{method:"POST",body:JSON.stringify(payload)});await loadDashboard();await loadMeta();toast(`已导入 ${r.students} 名学员和 ${r.attendance} 条出勤记录`)}catch(err){toast(err.message)}};
 
-if(document.modelContext?.registerTool)document.modelContext.registerTool({name:"query_training_record",title:"查询课程与学分",description:"根据姓名、院系和学员类型查询本人的总学分及课程出勤。",inputSchema:{type:"object",properties:{name:{type:"string"},department:{type:"string"},studentType:{type:"string",enum:["undergraduate","graduate"]}},required:["name","department","studentType"],additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute:x=>request("/api/query",{method:"POST",body:JSON.stringify(x)})}).catch?.(()=>{});
+if(document.modelContext?.registerTool) {
+  Promise.resolve().then(()=>document.modelContext.registerTool({
+    name:"query_training_record",
+    title:"查询课程与学分",
+    description:"根据培训班/团校、姓名、院系、所属小组和学员类型查询本人的总学分及课程出勤。",
+    inputSchema:{
+      type:"object",
+      properties:{
+        cohortId:{type:"integer",minimum:1},name:{type:"string"},department:{type:"string"},
+        groupName:{type:"string"},studentType:{type:"string",enum:["undergraduate","graduate"]}
+      },
+      required:["cohortId","name","department","groupName","studentType"],
+      additionalProperties:false
+    },
+    annotations:{readOnlyHint:true,untrustedContentHint:true},
+    execute:fields=>request("/api/query",{method:"POST",body:JSON.stringify(fields)})
+  })).catch(()=>{});
+}
 function summarizeCreditEligibility(rows, thresholds) {
   const passed=rows.filter(row=>row.totalCredits>=thresholds[row.studentType]).length;
   const count=rows.length;
@@ -738,7 +1009,7 @@ function bindCheckIn(courseId, roster, rosterDialog) {
     dialog.showModal();
   };
 }
-async function loadDepartments(){const id=$("#query-cohort").value,department=$("#department-select"),group=$("#group-select"),oldDepartment=department.value,oldGroup=group.value;if(!id){department.innerHTML='<option value="">请先选择培训班/团校</option>';group.innerHTML='<option value="">请先选择培训班/团校</option>';return}const m=await request(`/api/meta?cohortId=${encodeURIComponent(id)}`);department.innerHTML='<option value="">请选择院系</option>'+m.departments.map(x=>`<option>${esc(x)}</option>`).join("");group.innerHTML='<option value="">请选择所属小组</option>'+(m.groups||[]).map(x=>`<option>${esc(x)}</option>`).join("");if(m.departments.includes(oldDepartment))department.value=oldDepartment;if((m.groups||[]).includes(oldGroup))group.value=oldGroup}
+async function loadDepartments(){const id=$("#query-cohort").value,department=$("#department-select"),group=$("#group-select"),oldDepartment=department.value,oldGroup=group.value;if(!id){department.innerHTML='<option value="">请先选择培训班/团校</option>';group.innerHTML='<option value="">请先选择培训班/团校</option>';return}const m=await request(`/api/meta?cohortId=${encodeURIComponent(id)}`);if($("#query-cohort").value!==id)return;department.innerHTML='<option value="">请选择院系</option>'+m.departments.map(x=>`<option>${esc(x)}</option>`).join("");group.innerHTML='<option value="">请选择所属小组</option>'+(m.groups||[]).map(x=>`<option>${esc(x)}</option>`).join("");if(m.departments.includes(oldDepartment))department.value=oldDepartment;if((m.groups||[]).includes(oldGroup))group.value=oldGroup}
 $("#query-cohort").onchange=()=>loadDepartments().catch(err=>toast(err.message));
 
 $$("dialog button[value='cancel']").forEach(button=>{button.type="button";button.onclick=()=>button.closest("dialog").close()});
@@ -748,17 +1019,116 @@ $("#students-body").onclick=async e=>{const edit=e.target.dataset.editStudent,at
 
 $("#cohort-form").onsubmit=async e=>{e.preventDefault();const form=e.currentTarget;try{await request("/api/admin/cohorts",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();form.elements.id.value="";$("#cohort-cancel").classList.add("hidden");await loadMeta();renderCohorts();toast("培训班/团校已保存并立即生效")}catch(err){toast(err.message)}};
 
-const renderCoursesBase=renderCourses;renderCourses=function(){if(data?.user?.role!=="liaison")return renderCoursesBase();const courses=data.courses.filter(c=>c.active&&c.category==="required");$("#courses-body").innerHTML=courses.length?courses.map(c=>`<tr><td>${c.sortOrder}</td><td><strong>${esc(c.name)}</strong></td><td><span class="course-type required">必修课程</span></td><td>${c.credits}</td><td class="row-actions"><button class="small-btn primary-link" data-course-roster="${c.id}">登记本组补修</button></td></tr>`).join(""):'<tr><td colspan="5" class="empty-cell">暂无必修课程</td></tr>'};
+const renderCoursesBase=renderCourses;
+renderCourses=function(){
+  if (data.user.role!=="liaison") return renderCoursesBase();
+  const courses=data.courses.filter(course=>course.active);
+  const action=data.user.attendancePolicy.mode==="readonly"?"查看本组出勤":"本组出勤";
+  $("#courses-body").innerHTML=courses.map(course=>`<tr>
+    <td>${course.sortOrder}</td><td><strong>${esc(course.name)}</strong></td>
+    <td><span class="course-type ${course.category}">${categoryName(course.category)}</span></td><td>${course.credits}</td>
+    <td class="row-actions"><button class="small-btn primary-link" data-course-roster="${course.id}">${action}</button></td>
+  </tr>`).join("") || '<tr><td colspan="5" class="empty-cell">暂无课程</td></tr>';
+};
 $("#courses-body").onclick=async e=>{const edit=e.target.dataset.editCourse,remove=e.target.dataset.deleteCourse,roster=e.target.dataset.courseRoster;if(edit)openCourse(data.courses.find(c=>c.id===Number(edit)));if(roster)openCourseRoster(Number(roster));if(remove&&confirm("停用后，该课程不再计入任何学员总学分。确定继续吗？")){await request(`/api/admin/courses/${remove}`,{method:"DELETE"});await loadDashboard();toast("课程已停用")}};
 
-async function openCourseRoster(id){try{const r=await request(`/api/admin/courses/${id}/attendance`),liaison=data.user.role==="liaison";let dialog=$("#course-roster-dialog");if(!dialog){dialog=document.createElement("dialog");dialog.id="course-roster-dialog";dialog.className="wide-dialog";document.body.append(dialog)}const options=s=>liaison?`<option value="" ${!s.status?'selected':''}>未参加</option><option value="makeup" ${s.status==='makeup'?'selected':''}>完成补修</option>${s.status&&s.status!=='makeup'?`<option value="${s.status}" selected>${statusName(s.status)}（不可修改）</option>`:''}`:`<option value="" ${!s.status?'selected':''}>未参加</option><option value="attended" ${s.status==='attended'?'selected':''}>现场出勤</option><option value="makeup" ${s.status==='makeup'?'selected':''}>完成补修</option><option value="special" ${s.status==='special'?'selected':''}>特殊课程（8学分）</option>`;dialog.innerHTML=`<form method="dialog" id="course-roster-form"><div class="dialog-head"><div><h2>${esc(r.course.name)} · ${liaison?'补修登记':'出勤登记'}</h2><p>${liaison?'仅可将本组未现场出勤的学员登记为完成补修。':'可勾选多名学员后批量处理出勤状态。'}</p></div><button class="icon-btn" type="button" id="roster-close">×</button></div><input id="roster-search" placeholder="搜索姓名、院系或小组"><div class="bulk-tools"><button type="button" class="ghost" id="select-all-roster">一键全选</button><button type="button" class="ghost" id="clear-roster-selection">取消选择</button>${liaison?'':`<button type="button" class="secondary" data-batch-status="attended">批量现场出勤</button><button type="button" class="primary" id="roster-check-in">名单签到</button>`}<button type="button" class="secondary" data-batch-status="makeup">批量完成补修</button>${liaison?'':`<button type="button" class="ghost" data-batch-status="">批量设为未参加</button>`}</div><div class="attendance-list" id="course-roster-list">${r.students.map(s=>{const locked=liaison&&s.status==='attended';return`<div class="attendance-row ${s.withdrawn?'withdrawn-row':''}" data-student="${s.id}" data-search="${esc(`${s.name} ${s.department} ${s.groupName}`.toLowerCase())}"><input class="roster-check" type="checkbox" ${locked?'disabled':''} aria-label="选择${esc(s.name)}"><div><strong>${esc(s.name)}</strong><small>${esc(s.department)} · ${esc(s.groupName||'未分组')}${s.withdrawn?' · 已退出／休学':''}</small></div><select ${locked?'disabled':''}>${options(s)}</select><strong>${s.status==='special'?8:s.status?r.course.credits:0} 分</strong></div>`}).join("")}</div><div class="dialog-actions"><button class="ghost" type="button" id="roster-cancel">取消</button><button class="primary" type="submit">保存${liaison?'补修':'出勤'}记录</button></div></form>`;dialog.showModal();if(!liaison)bindCheckIn(id,r,dialog);const close=()=>dialog.close();$("#roster-close").onclick=close;$("#roster-cancel").onclick=close;$("#roster-search").oninput=e=>{$$("#course-roster-list .attendance-row").forEach(x=>x.classList.toggle("hidden",!x.dataset.search.includes(e.target.value.trim().toLowerCase())))};$("#select-all-roster").onclick=()=>{$$("#course-roster-list .attendance-row:not(.hidden) .roster-check:not(:disabled)").forEach(x=>x.checked=true)};$("#clear-roster-selection").onclick=()=>{$$("#course-roster-list .roster-check").forEach(x=>x.checked=false)};$$("[data-batch-status]").forEach(button=>button.onclick=()=>{$$("#course-roster-list .roster-check:checked").forEach(check=>{const row=check.closest(".attendance-row"),select=row.querySelector("select");select.value=button.dataset.batchStatus;select.dispatchEvent(new Event("change",{bubbles:true}))})});$("#course-roster-list").onchange=e=>{if(e.target.tagName!=="SELECT")return;const row=e.target.closest(".attendance-row");row.querySelector(":scope>strong").textContent=`${e.target.value==='special'?8:e.target.value?r.course.credits:0} 分`};$("#course-roster-form").onsubmit=async e=>{e.preventDefault();const items=$$("#course-roster-list .attendance-row").map(x=>({studentId:Number(x.dataset.student),status:x.querySelector("select").value}));try{await request(`/api/admin/courses/${id}/attendance`,{method:"POST",body:JSON.stringify({items})});dialog.close();await loadDashboard();toast(liaison?"补修记录已保存":"课程出勤已批量保存")}catch(err){toast(err.message)}}}catch(err){toast(err.message)}}
+async function openCourseRoster(id) {
+  try {
+    const path="/api/admin/courses/"+id+"/attendance";
+    const roster=await request(path), {course,students,attendancePolicy:policy}=roster;
+    const manager=policy.mode==="manager";
+    let dialog=$("#course-roster-dialog");
+    if (!dialog) {
+      dialog=document.createElement("dialog");
+      dialog.id="course-roster-dialog";
+      dialog.className="wide-dialog";
+      document.body.append(dialog);
+    }
+    const batchLabels={attended:"批量现场出勤",makeup:"批量完成补修","":"批量设为未参加"};
+    const batchChoices=manager?attendanceStatuses:attendanceStatuses.filter(status=>students.some(student=>
+      (student.status??"")!==status &&
+      attendanceOptions(policy,course.category,student.status??"",student.withdrawn).includes(status)
+    ));
+    const editable=batchChoices.length>0;
+    dialog.innerHTML=`<form method="dialog" id="course-roster-form">
+      <div class="dialog-head"><div><h2>${esc(course.name)} · ${editable?"出勤登记":"查看出勤"}</h2>
+      <p>${esc(policyDescription(policy))}</p></div><button class="icon-btn" type="button" id="roster-close" aria-label="关闭">×</button></div>
+      <input id="roster-search" placeholder="搜索姓名、院系或小组" aria-label="搜索姓名、院系或小组">
+      ${editable?`<div class="bulk-tools">
+        <button type="button" class="ghost" id="select-all-roster">一键全选</button>
+        <button type="button" class="ghost" id="clear-roster-selection">取消选择</button>
+        ${batchChoices.map(status=>`<button type="button" class="secondary" data-batch-status="${status}">${batchLabels[status]}</button>`).join("")}
+        ${manager?'<button type="button" class="primary" id="roster-check-in">名单签到</button>':""}
+      </div>`:""}
+      <div class="attendance-list" id="course-roster-list">${students.map(student=>{
+        const status=student.status??"";
+        const choices=availableAttendanceStatuses(policy,course.category,status,student.withdrawn);
+        return `<div class="attendance-row ${student.withdrawn?"withdrawn-row":""}" data-student-id="${student.id}"
+            data-student="${student.id}" data-original-status="${status}" data-credits="${course.credits}"
+            data-credit-override="${student.creditOverride??""}" data-search="${esc((student.name+" "+student.department+" "+student.groupName).toLowerCase())}">
+          <input class="roster-check" type="checkbox" ${choices.length===1?"disabled":""} aria-label="选择${esc(student.name)}">
+          <div><strong>${esc(student.name)}</strong><small>${esc(student.department)} · ${esc(student.groupName||"未分组")}${student.withdrawn?" · 已退出／休学":""}</small></div>
+          ${attendanceSelect(choices,status,student.name+"的出勤状态")}
+          <strong>${earnedCredits(status,course.credits,student.creditOverride)} 分</strong>
+        </div>`;
+      }).join("") || '<p class="muted">当前范围内暂无学员。</p>'}</div>
+      <div class="dialog-actions"><button class="ghost" type="button" id="roster-cancel">${editable?"取消":"关闭"}</button>
+      ${editable?'<button class="primary" type="submit">保存出勤记录</button>':""}</div></form>`;
+    dialog.showModal();
+    if (manager) bindCheckIn(id,roster,dialog);
+    $("#roster-close").onclick=$("#roster-cancel").onclick=()=>dialog.close();
+    const list=$("#course-roster-list");
+    $("#roster-search").oninput=event=>{
+      const query=event.target.value.trim().toLowerCase();
+      for (const row of list.querySelectorAll(".attendance-row")) {
+        const visible=row.dataset.search.includes(query);
+        row.classList.toggle("hidden",!visible);
+        if (!visible) row.querySelector(".roster-check").checked=false;
+      }
+    };
+    if (!editable) return;
+    $("#select-all-roster").onclick=()=>{
+      list.querySelectorAll(".attendance-row:not(.hidden) .roster-check:not(:disabled)").forEach(input=>input.checked=true);
+    };
+    $("#clear-roster-selection").onclick=()=>list.querySelectorAll(".roster-check").forEach(input=>input.checked=false);
+    dialog.querySelectorAll("[data-batch-status]").forEach(button=>button.onclick=()=>{
+      const status=button.dataset.batchStatus;
+      list.querySelectorAll(".roster-check:checked").forEach(input=>{
+        const select=input.closest(".attendance-row").querySelector("select");
+        if (!Array.from(select.options).some(option=>option.value===status)) return;
+        select.value=status;
+        select.dispatchEvent(new Event("change",{bubbles:true}));
+      });
+    });
+    list.onchange=updateAttendanceCredits;
+    $("#course-roster-form").onsubmit=event=>{
+      event.preventDefault();
+      if (!editable) return;
+      const items=changedAttendanceRows(list,"studentId");
+      return saveAttendanceChanges(event,path,{items},dialog,"课程出勤已保存");
+    };
+  } catch(error) {
+    toast(error.message);
+  }
+}
 
-openAttendance=async function(id){try{const r=await request(`/api/admin/students/${id}`),liaison=data.user.role==="liaison";$("#attendance-form").elements.studentId.value=id;$("#attendance-title").textContent=`${r.student.name}的课程记录`;$("#attendance-list").innerHTML=r.attendance.map(a=>{const mayMakeup=liaison&&a.category==='required'&&a.status!=='attended',disabled=liaison&&!mayMakeup;return`<div class="attendance-row" data-course="${a.courseId}"><div><strong>${esc(a.name)}</strong><small>${categoryName(a.category)} · 标准 ${a.credits} 学分</small></div><select ${disabled?'disabled':''}>${liaison?`<option value="${a.status||''}" selected>${statusName(a.status)}</option>${mayMakeup&&a.status!=='makeup'?'<option value="makeup">完成补修</option>':''}`:`<option value="" ${!a.status?'selected':''}>未参加</option><option value="attended" ${a.status==='attended'?'selected':''}>现场出勤</option><option value="makeup" ${a.status==='makeup'?'selected':''}>完成补修</option><option value="special" ${a.status==='special'?'selected':''}>特殊课程（8学分）</option>`}</select><strong>${a.status==='special'?8:a.status?a.credits:0} 分</strong></div>`}).join("");$("#attendance-form button[type='submit']").classList.toggle("hidden",!(data.user.canEdit||liaison));$("#attendance-dialog").showModal()}catch(err){toast(err.message)}};
+
 
 $(".admin-tabs").insertAdjacentHTML("beforeend",'<button class="tab-btn" id="guide-tab-btn" data-tab="guide">系统操作指南</button>');
 $("#dashboard").insertAdjacentHTML("beforeend",'<section class="panel tab-panel hidden" id="tab-guide"><div class="panel-head"><div><h2>系统操作指南</h2><p id="guide-role-name"></p></div></div><div id="guide-content" class="guide-content"></div></section>');
 $("#guide-tab-btn").onclick=()=>{$$(".tab-btn").forEach(x=>x.classList.toggle("active",x===$("#guide-tab-btn")));$$(".tab-panel").forEach(x=>x.classList.add("hidden"));$("#tab-guide").classList.remove("hidden");renderGuide()};
-function renderGuide(){if(!data)return;const role=data.user.role,common=`<div class="guide-step"><h3>查看统计与学员记录</h3><p>登录时选择培训班/团校。首页统计不包含退出或休学学员；进入“学员与学分”，可搜索姓名、院系或组别，点击“课程记录”查看逐门课程情况。</p></div>`,superGuide=`<div class="guide-step"><h3>学员、课程与数据</h3><p>可新增、编辑或删除学员；在课程管理中新增课程、调整课程类别和学分，并通过勾选学员后批量登记现场出勤、补修或未参加。完整 Excel 可下载范例、导入和导出。</p></div><div class="guide-step"><h3>培训班/团校、结业与账号权限</h3><p>在“培训班/团校管理”中新建或修改培训班/团校；在“结业设置”配置本科、硕博总学分及必修学分门槛；在“账号与权限”审批注册申请，创建组织部骨干并勾选其授权的培训班/团校，或创建指定班级和小组的联络员账号，并可修改密码或删除普通账号。</p></div>`,orgGuide=`<div class="guide-step"><h3>数据维护</h3><p>可新增、编辑或删除学员，维护课程和批量登记出勤，使用 Excel 导入、导出，设置结业标准并修改已授权的培训班/团校名称。登录时请选择获授权的培训班/团校。</p></div>`,liaisonGuide=`<div class="guide-step"><h3>本组查看与补修登记</h3><p>只能查看获授权的培训班/团校内本小组学员的学分和课程记录。在“课程管理”中仅显示必修课程，可勾选本组未现场出勤的学员并批量登记“完成补修”；也可从个人课程记录中登记。不能修改现场出勤、选修课、学员资料、课程设置或账号。</p></div>`;$("#guide-role-name").textContent=`当前权限：${data.user.roleName}`;$("#guide-content").innerHTML=common+(role==='super'?superGuide:role==='org'?orgGuide:liaisonGuide)+`<p class="guide-credit">本系统由北京大学历史学系2024级本科生张桐玮基于vibe-coding搭建，北京大学信息科学学院2024级本科生唐天睿提供重要技术支持；服务器依托北京大学学生Linux俱乐部开发并维护的PKU clab云主机，在此一并致谢。如对本系统存在疑问，可通过邮箱联系：<a href="mailto:zhangtongwei@stu.pku.edu.cn">zhangtongwei@stu.pku.edu.cn</a>。</p>`}
-const renderEnhancedBase=render;render=function(){const result=renderEnhancedBase();if(data.user.role==="liaison"){$(".tab-btn[data-tab='courses']").classList.remove("hidden");$("#tab-courses").classList.remove("role-hidden");$("#new-course-btn").classList.add("hidden")}renderCompletionOverview();renderGuide();return result};
+function renderGuide(){if(!data)return;const role=data.user.role,common=`<div class="guide-step"><h3>查看统计与学员记录</h3><p>登录时选择培训班/团校。首页统计不包含退出或休学学员；进入“学员与学分”，可搜索姓名、院系或组别，点击“课程记录”查看逐门课程情况。</p></div>`,superGuide=`<div class="guide-step"><h3>学员、课程与数据</h3><p>可新增、编辑或删除学员；在课程管理中新增课程、调整课程类别和学分，并通过勾选学员后批量登记现场出勤、补修或未参加。完整 Excel 可下载范例、导入和导出。</p></div><div class="guide-step"><h3>培训班/团校、结业与账号权限</h3><p>在“培训班/团校管理”中新建或修改培训班/团校；在“结业设置”配置本科、硕博总学分及必修学分门槛；在“账号与权限”审批注册申请，创建组织部骨干并勾选其授权的培训班/团校，或创建指定班级和小组的联络员账号，并可修改密码或删除普通账号。在“小组联络员出勤权限”中，可给单个或多个联络员设置出勤权限，也可统一设置一个培训班/团校的所有联络员。</p></div>`,orgGuide=`<div class="guide-step"><h3>数据维护</h3><p>可新增、编辑或删除学员，维护课程和批量登记出勤，使用 Excel 导入、导出，设置结业标准并修改已授权的培训班/团校名称。登录时请选择获授权的培训班/团校。</p></div>`,liaisonGuide=`<div class="guide-step"><h3>本组学员与出勤</h3><p>在“课程管理”或学员的“课程记录”中查看本组出勤。页面会显示当前账号可登记的课程和状态。只读课程、已退出学员和特殊课程的记录由管理员处理。</p><p>${esc(policyDescription(data.user.attendancePolicy))}</p></div>`;$("#guide-role-name").textContent=`当前权限：${data.user.roleName}`;$("#guide-content").innerHTML=common+(role==='super'?superGuide:role==='org'?orgGuide:liaisonGuide)+`<p class="guide-credit">本系统由北京大学历史学系2024级本科生张桐玮基于vibe-coding搭建，北京大学信息科学学院2024级本科生唐天睿提供重要技术支持；服务器依托北京大学学生Linux俱乐部开发并维护的PKU clab云主机，在此一并致谢。如对本系统存在疑问，可通过邮箱联系：<a href="mailto:zhangtongwei@stu.pku.edu.cn">zhangtongwei@stu.pku.edu.cn</a>。</p>`}
+const renderEnhancedBase=render;
+render=function(){
+  const result=renderEnhancedBase();
+  $("#new-course-btn").classList.toggle("hidden",!data.user.canEdit);
+  if(data.user.role==="liaison"){
+    $(".tab-btn[data-tab='courses']").classList.remove("hidden");
+    $("#tab-courses").classList.remove("role-hidden");
+  }
+  renderCompletionOverview();
+  renderGuide();
+  return result;
+};
 if(location.hash==="#admin") loadMeta();
 switchView();
