@@ -118,7 +118,7 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   legacyFixture(directory);
   cpSync(join(root,"server.mjs"),join(directory,"server.mjs"));
   mkdirSync(join(directory,"public"));
-  for(const asset of ["attendance-policy.js","query-select.js","training-workbook.js","app.js","index.html","admin.css","styles.css","pku-seal-v1.png","favicon.svg"]) {
+  for(const asset of ["attendance-policy.js","custom-select.js","training-workbook.js","app.js","index.html","admin.css","styles.css","pku-seal-v1.png","favicon.svg"]) {
     cpSync(join(root,"public",asset),join(directory,"public",asset));
   }
   symlinkSync(join(root,"node_modules"),join(directory,"node_modules"),process.platform==="win32"?"junction":"dir");
@@ -139,7 +139,7 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   const createLiaison=(username,cohortId,groupName)=>write(admin,"/api/admin/accounts",{username,password,role:"liaison",cohortId,groupName});
 
   await visitor("/",{inspect:true});
-  await visitor("/query-select.js",{inspect:true});
+  await visitor("/custom-select.js",{inspect:true});
   await visitor("/attendance-policy.js",{inspect:true});
   await visitor("/vendor/",{status:404,inspect:true});
   await visitor("/api/admin/accounts",{status:401});

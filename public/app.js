@@ -1,12 +1,9 @@
 import { attendanceOptions, attendanceStatuses, legacyAttendancePolicy } from "./attendance-policy.js";
-import { enhanceQuerySelect } from "./query-select.js";
+import { refreshSelect, startCustomSelects } from "./custom-select.js";
 import { readTrainingWorkbook } from "./training-workbook.js";
 
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const queryCohort=$("#query-cohort"), queryDepartment=$("#department-select"), queryGroup=$("#group-select");
-const refreshQueryCohort=enhanceQuerySelect(queryCohort);
-const refreshQueryDepartment=enhanceQuerySelect(queryDepartment);
-const refreshQueryGroup=enhanceQuerySelect(queryGroup);
 let queryOptionsVersion=0;
 let data=null, editingStudent=null, accountsData=null, dashboardVersion=0;
 const completionStyle=document.createElement("style");completionStyle.textContent=".completion-box{margin:22px 0 4px;padding:18px 20px;background:#faf7f7;border:1px solid #eadcdf;border-radius:12px}.completion-summary{display:flex;align-items:center;justify-content:space-between;gap:18px;font-size:.95rem}.required-earned{color:var(--muted);text-align:right}.required-earned strong{color:var(--ink);font-size:1.05rem}.completion-requirement{margin-top:15px;padding-top:14px;border-top:1px solid #eadcdf;color:var(--red);font-size:1rem;letter-spacing:.01em}@media(max-width:520px){.completion-box{padding:16px}.completion-summary{align-items:flex-start;flex-direction:column;gap:10px}.required-earned{text-align:left}.completion-requirement{line-height:1.8}}";document.head.append(completionStyle);
@@ -70,7 +67,11 @@ registrationForm.onsubmit=async event=>{
     registrationForm.reset();
     $("#login-form").elements.username.value=fields.username.trim();
     const firstCohort=fields.cohortId??fields.cohortIds?.[0];
-    if (firstCohort) $("#admin-cohort").value=String(firstCohort);
+    if (firstCohort) {
+      const cohort=$("#admin-cohort");
+      cohort.value=String(firstCohort);
+      refreshSelect(cohort);
+    }
     switchAuth("login");
     showAuthMessage("注册申请已提交。审批通过后可登录。");
   } catch(error) {
@@ -143,7 +144,6 @@ async function loadMeta() {
     for (const id of ["#query-cohort","#admin-cohort","#registration-cohort"]) {
       setCohortOptions($(id),cohortList,"请选择培训班/团校",true);
     }
-    refreshQueryCohort();
     setScopeChoices($("#registration-org-scope .cohort-choices"),cohortList);
     if(document.documentElement.dataset.view==="query") await loadDepartments();
     if(data && activeAdminTab==="cohorts") renderCohorts();
@@ -492,6 +492,8 @@ function policyDescription(policy) {
 function setPolicyFields(policy) {
   permissionForm.elements.mode.value=policy?.mode??"inherit";
   permissionForm.elements.scope.value=policy?.scope??"required";
+  refreshSelect(permissionForm.elements.mode);
+  refreshSelect(permissionForm.elements.scope);
   permissionForm.querySelectorAll("[name=statuses]").forEach(input=>{
     input.checked=policy?.statuses?.includes(input.value)??false;
   });
@@ -533,12 +535,13 @@ updatePermissionForm();
 
 function editSelectedPolicy() {
   permissionForm.elements.target.value="accounts";
+  refreshSelect(permissionForm.elements.target);
   const selected=accountsData?.accounts.find(account=>selectedLiaisonIds.has(account.id));
   setPolicyFields(selectedLiaisonIds.size===1?selected?.attendancePolicy:null);
   const editor=$("#liaison-permissions");
   editor.open=true;
   editor.scrollIntoView({block:"nearest"});
-  permissionForm.elements.mode.focus({preventScroll:true});
+  refreshSelect(permissionForm.elements.mode).focus({preventScroll:true});
 }
 
 $("#select-visible-liaisons").onclick=()=>{
@@ -1018,6 +1021,7 @@ $("#completion-gaps").onclick=event=>{
   if (!trigger) return;
   const key=trigger.dataset.gapFilter;
   $("#completion-roster-filter").value=key;
+  refreshSelect($("#completion-roster-filter"));
   renderCompletionGaps();
   // Restore keyboard focus after the chart buttons have been replaced.
   $(`[data-gap-filter="${key}"]`)?.focus({preventScroll:true});
@@ -1037,7 +1041,7 @@ $$("[data-completion-view]").forEach(button=>{
 // 2026 interface and workflow enhancements
 const featureStyle=document.createElement("style");featureStyle.textContent=".bulk-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:14px 0}.bulk-tools button{padding:8px 12px}.roster-check{width:20px!important;height:20px;margin:0!important}.guide-content{display:grid;gap:16px}.guide-step{padding:18px;border:1px solid var(--line);border-radius:12px;background:#fafafa}.guide-step h3{margin:0 0 8px;color:var(--red)}.guide-step p,.guide-step li{color:var(--muted)}.guide-credit{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);font-size:.78rem;color:var(--muted);line-height:1.7}.role-hint{margin:0 0 14px;padding:12px 14px;border-radius:10px;background:#f7f1e8;color:#6d4918}.row-actions{white-space:nowrap}@media(max-width:700px){.bulk-tools>*{flex:1}.guide-step{padding:15px}}";document.head.append(featureStyle);
 
-const rosterStyle=document.createElement("style");rosterStyle.textContent=".attendance-row:has(.roster-check){grid-template-columns:auto minmax(180px,1fr) minmax(150px,220px) 70px}.account-scope select{width:100%}@media(max-width:700px){.attendance-row:has(.roster-check){grid-template-columns:auto 1fr}.attendance-row:has(.roster-check)>select,.attendance-row:has(.roster-check)>strong{grid-column:2}}";document.head.append(rosterStyle);
+const rosterStyle=document.createElement("style");rosterStyle.textContent=".attendance-row:has(.roster-check){grid-template-columns:auto minmax(180px,1fr) minmax(150px,220px) 70px}@media(max-width:700px){.attendance-row:has(.roster-check){grid-template-columns:auto minmax(0,1fr)}.attendance-row:has(.roster-check)>.system-select-control,.attendance-row:has(.roster-check)>strong{grid-column:2}}";document.head.append(rosterStyle);
 
 const checkInHeaders={
   name:new Set(["姓名","学员姓名","学生姓名","参与者姓名","参与人姓名","签到姓名","真实姓名"]),
@@ -1204,8 +1208,6 @@ async function loadDepartments(reset=false) {
     const message=id?"正在加载…":"请先选择培训班/团校";
     queryDepartment.replaceChildren(new Option(message,""));
     queryGroup.replaceChildren(new Option(message,""));
-    refreshQueryDepartment();
-    refreshQueryGroup();
   }
   if (!id) return;
   try {
@@ -1222,11 +1224,6 @@ async function loadDepartments(reset=false) {
     queryDepartment.replaceChildren(new Option("院系暂时无法加载",""));
     queryGroup.replaceChildren(new Option("小组暂时无法加载",""));
     throw error;
-  } finally {
-    if (version===queryOptionsVersion) {
-      refreshQueryDepartment();
-      refreshQueryGroup();
-    }
   }
 }
 queryCohort.onchange=()=>loadDepartments(true).catch(error=>toast(error.message));
@@ -1392,4 +1389,5 @@ render=function(){
   renderAdminPanel();
   return result;
 };
+startCustomSelects();
 switchView();
