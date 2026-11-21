@@ -1,16 +1,201 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="北京大学团支书培训班课程出勤与学分查询系统"><title>团支书培训班课程与学分系统</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/styles.css"></head><body>
-<header class="topbar"><a class="brand" href="#query"><span class="brand-mark">北</span><span><strong>团支书培训班</strong><small>课程与学分系统</small></span></a><nav><button class="nav-btn active" data-view="query">学员查询</button><button class="nav-btn" data-view="admin">管理员后台</button></nav></header>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="北京大学团校团支部书记培训班课程管理系统">
+  <title>课程管理系统 | 北京大学团校</title>
+  <link rel="icon" href="/favicon.svg?v=school" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css?v=cohort-grants">
+  <script>document.documentElement.dataset.view=location.hash==="#admin"?"admin":"query"</script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#query">
+    <img class="brand-logo" src="/pku-seal-v1.png?v=2" width="54" height="54" alt="">
+    <span class="brand-copy">
+      <span>北京大学团校</span>
+      <span>北京大学团支部书记培训班</span>
+    </span>
+  </a>
+  <nav aria-label="主导航">
+    <a class="nav-btn" data-view="query" href="#query">学员查询</a>
+    <a class="nav-btn" data-view="admin" href="#admin">管理员后台</a>
+  </nav>
+</header>
 <main>
-<section id="query-view" class="view query-shell"><div class="query-intro"><span class="eyebrow">TRAINING RECORD</span><h1>课程出勤与学分查询</h1><p>填写与报名信息一致的姓名、院系和学员类型，查看本人的总学分及课程出勤记录。</p><div class="seal"><span>博雅</span><i>勤奋・严谨・求实・创新</i></div></div><div class="query-card"><form id="query-form"><label>姓名<input name="name" maxlength="40" autocomplete="name" placeholder="请输入姓名" required></label><label>院系<select name="department" id="department-select" required><option value="">请选择院系</option></select></label><fieldset><legend>学员类型</legend><div class="segmented"><label><input type="radio" name="studentType" value="undergraduate" checked><span>本科生</span></label><label><input type="radio" name="studentType" value="graduate"><span>硕博生</span></label></div></fieldset><button class="primary full">查询记录 <span>→</span></button></form><div id="query-result" class="result hidden" aria-live="polite"></div></div></section>
-<section id="admin-view" class="view hidden"><div id="admin-login" class="login-wrap"><div class="login-card"><div class="mini-mark">北</div><h1>管理员登录</h1><p>管理学员、课程、出勤与结业标准。</p><form id="login-form"><label>管理员账号<input name="username" autocomplete="username" required></label><label>管理员密码<input type="password" name="password" autocomplete="current-password" required></label><button class="primary full">进入后台</button></form></div></div>
-<div id="dashboard" class="dashboard hidden"><div class="dash-head"><div><span class="eyebrow">ADMIN CONSOLE</span><h1>培训班管理</h1><p>学分由每门已参加课程的学分自动汇总。</p></div><button class="ghost" id="logout-btn">退出登录</button></div><div class="stat-grid" id="stat-grid"></div>
-<div class="admin-tabs" role="tablist"><button class="tab-btn active" data-tab="students">学员与学分</button><button class="tab-btn" data-tab="courses">课程管理</button><button class="tab-btn" data-tab="settings">结业设置</button></div>
+<section id="query-view" class="view query-shell">
+  <div class="query-intro">
+    <h1>课程管理系统</h1>
+    <p>填写与报名信息一致的姓名、院系和学员类型，查看本人的总学分及课程出勤记录。</p>
+  </div>
+  <div class="query-card">
+    <form id="query-form" method="post" action="/api/query">
+      <label class="query-cohort-field">培训班/团校<select name="cohortId" id="query-cohort" required><option value="">请选择培训班/团校</option></select></label>
+      <label>姓名<input name="name" maxlength="40" autocomplete="name" placeholder="请输入姓名" required></label>
+      <label>院系<select name="department" id="department-select" required><option value="">请选择院系</option></select></label>
+      <label>所属小组<select name="groupName" id="group-select" required><option value="">请选择所属小组</option></select></label>
+      <fieldset><legend>学员类型</legend><div class="segmented"><label><input type="radio" name="studentType" value="undergraduate" checked><span>本科生</span></label><label><input type="radio" name="studentType" value="graduate"><span>硕博生</span></label></div></fieldset>
+      <button class="primary full">查询记录</button>
+    </form>
+    <div id="query-result" class="result hidden" aria-live="polite"></div>
+  </div>
+</section>
+<section id="admin-view" class="view">
+<div id="admin-login" class="login-wrap">
+  <div class="login-card">
+    <h1>管理员后台</h1>
+    <div class="auth-switch" aria-label="账号入口">
+      <button type="button" data-auth="login" aria-pressed="true">登录</button>
+      <button type="button" data-auth="register" aria-pressed="false">注册</button>
+    </div>
+    <form id="login-form" method="post" action="/api/admin/login">
+      <label>培训班/团校<select name="cohortId" id="admin-cohort" required><option value="">请选择培训班/团校</option></select></label>
+      <label>管理员账号<input name="username" autocomplete="username" required></label>
+      <label>管理员密码<input type="password" name="password" autocomplete="current-password" required></label>
+      <button class="primary full">登录</button>
+    </form>
+    <form id="registration-form" class="hidden" method="post" action="/api/admin/register">
+      <p>审批通过后，可用申请时填写的账号和密码登录。</p>
+      <label>账号<input name="username" maxlength="60" autocomplete="username" required></label>
+      <label>密码<input type="password" name="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+      <label>申请角色<select name="role" required><option value="liaison">小组联络员</option><option value="org">校团委组织部骨干</option></select></label>
+      <fieldset id="registration-org-scope" class="org-cohort-scope hidden" disabled>
+        <legend>申请管理的培训班/团校</legend>
+        <p class="muted">至少选一项，可多选。以管理员审批结果为准。</p>
+        <div class="cohort-choices"></div>
+      </fieldset>
+      <label class="registration-scope">所属培训班/团校<select name="cohortId" id="registration-cohort" required><option value="">请选择培训班/团校</option></select></label>
+      <label class="registration-scope">负责小组<select name="groupName" required><option value="">请先选择培训班/团校</option></select></label>
+      <button class="primary full">提交注册申请</button>
+    </form>
+    <p id="auth-message" class="auth-message hidden" role="status"></p>
+  </div>
+</div>
+<div id="dashboard" class="dashboard hidden"><div class="dash-head"><div><h1>培训班/团校管理</h1><p></p></div><button class="ghost" id="logout-btn">退出登录</button></div><div class="stat-grid" id="stat-grid"></div>
+<div class="admin-tabs" role="tablist"><button class="tab-btn active" data-tab="students">学员与学分</button><button class="tab-btn" data-tab="courses">课程管理</button><button class="tab-btn" data-tab="settings">结业设置</button><button class="tab-btn" data-tab="completion">结业统计</button></div>
 <section class="panel tab-panel" id="tab-students"><div class="panel-head"><div><h2>学员与学分</h2><p>可查看个人信息、退出状态，并为学员增减参加课程。</p></div><div class="panel-actions"><a class="ghost button-link" id="template-download" href="/api/admin/template.xlsx">下载导入范例</a><label class="primary file-btn">一键导入完整 Excel<input id="full-excel-input" type="file" accept=".xlsx,.xls"></label><a class="primary button-link" id="export-download" href="/api/admin/export.xlsx">一键导出完整 Excel</a><button class="primary" id="new-student-btn">新增学员</button></div></div><div class="table-tools"><input id="student-search" placeholder="搜索姓名、院系、小组或联络员"><label class="inline-check"><input type="checkbox" id="show-withdrawn" checked>显示已退出</label><span id="student-count"></span></div><div class="table-wrap"><table><thead><tr><th>姓名</th><th>院系</th><th>组别</th><th>类型</th><th>总学分</th><th>必修学分</th><th>课程数</th><th>状态</th><th>结业</th><th></th></tr></thead><tbody id="students-body"></tbody></table></div></section>
 <section class="panel tab-panel hidden" id="tab-courses"><div class="panel-head"><div><h2>课程管理</h2><p>课程学分修改后，所有学员总学分会立即重新计算。</p></div><button class="primary" id="new-course-btn">新增课程</button></div><div class="table-wrap course-table"><table><thead><tr><th>顺序</th><th>课程名称</th><th>类别</th><th>标准学分</th><th></th></tr></thead><tbody id="courses-body"></tbody></table></div></section>
 <section class="tab-panel hidden" id="tab-settings"><div class="admin-grid"><section class="panel"><div class="panel-head"><div><h2>结业标准</h2><p>学员须同时达到总学分和必修课学分要求；已退出或休学学员不计入统计。</p></div></div><form id="settings-form" class="settings-form"><label>本科生结业学分<input type="number" min="0" max="10000" step="0.5" name="undergraduate" required></label><label>硕博生结业学分<input type="number" min="0" max="10000" step="0.5" name="graduate" required></label><label>必修课结业学分<input type="number" min="0" max="10000" step="0.5" name="required" required></label><button class="primary">保存设置</button></form></section><section class="panel"><div class="panel-head"><div><h2>统计口径</h2><p>普通出勤和补修均取得课程标准学分；Excel 中“2 2/3”按特殊课程 8 学分计算。</p></div></div><div id="type-chart" class="type-chart"></div></section></div></section>
+<section class="panel tab-panel hidden" id="tab-completion">
+  <div class="panel-head">
+    <div>
+      <h2>结业统计</h2>
+      <p id="completion-scope"></p>
+    </div>
+    <label class="completion-mode" id="completion-mode-control">统计口径
+      <select id="completion-mode">
+        <option value="official">正式结业（总学分和必修学分均达标）</option>
+        <option value="credits">仅看总学分（假定必修已完成）</option>
+      </select>
+    </label>
+  </div>
+  <p id="completion-note" class="muted"></p>
+  <div class="completion-nav" role="group" aria-label="统计视图">
+    <button type="button" data-completion-view="overview" aria-controls="completion-overview" aria-pressed="true">结业总览</button>
+    <button type="button" data-completion-view="departments" aria-controls="completion-departments" aria-pressed="false">院系对比</button>
+    <button type="button" data-completion-view="gaps" aria-controls="completion-gaps" aria-pressed="false">结业差距</button>
+  </div>
+  <div id="completion-overview">
+    <div id="completion-charts" class="completion-charts" aria-live="polite"></div>
+  </div>
+  <section id="completion-departments" class="completion-section hidden" aria-labelledby="department-completion-heading">
+    <h3 id="department-completion-heading">各院系结业情况</h3>
+    <div class="completion-filters">
+      <label>院系<select id="completion-department"><option value="">全部院系</option></select></label>
+      <label>排序<select id="completion-department-sort">
+        <option value="count">按学员人数</option>
+        <option value="rate">按达标率</option>
+        <option value="name">按院系名称</option>
+      </select></label>
+    </div>
+    <div id="department-completion-chart" aria-live="polite"></div>
+  </section>
+  <section id="completion-gaps" class="completion-section hidden" aria-labelledby="completion-gaps-heading">
+    <h3 id="completion-gaps-heading">距离正式结业还有多远</h3>
+    <p class="muted completion-method">按正式结业门槛测算。假定每门未修的启用课程可取得其标准学分，从中选取门数最少的一组，使总学分和必修学分都达标。</p>
+    <div id="completion-gap-summary" class="completion-gap-summary"></div>
+    <div class="completion-gap-grid">
+      <section class="completion-figure" aria-labelledby="completion-distribution-heading">
+        <h4 id="completion-distribution-heading">未结业学员的差距分布</h4>
+        <div id="completion-distribution"></div>
+      </section>
+      <section class="completion-figure" aria-labelledby="completion-roster-heading">
+        <h4 id="completion-roster-heading">学员名单</h4>
+        <label>查看范围<select id="completion-roster-filter">
+          <option value="requiredShort">总学分达标，必修不足</option>
+          <option value="requiredOnly">仅补齐剩余必修即可结业</option>
+          <option value="one">最少再修 1 门</option>
+          <option value="two">最少再修 2 门</option>
+          <option value="threePlus">最少再修 3 门及以上</option>
+          <option value="impossible">修完现有课程仍不足</option>
+          <option value="noneStudied">未修任何课程</option>
+          <option value="incomplete">全部未结业</option>
+        </select></label>
+        <p id="completion-roster-count" class="muted" role="status"></p>
+        <div class="table-wrap completion-roster-wrap" tabindex="0" aria-label="结业差距学员名单">
+          <table class="completion-roster">
+            <thead><tr><th scope="col">学员</th><th scope="col">总学分</th><th scope="col">必修学分</th><th scope="col">未修必修</th><th scope="col">最少再修</th></tr></thead>
+            <tbody id="completion-roster-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <p class="muted completion-method">同一学员可能同时出现在多个名单中。未修任何课程指启用课程内没有出勤、补修或特殊课程记录。</p>
+  </section>
+</section>
+<section class="panel tab-panel hidden" id="tab-accounts">
+  <div class="panel-head"><h2>账号与权限</h2></div>
+  <section class="registrations" aria-labelledby="registration-heading">
+    <h3 id="registration-heading">待审批注册 <span id="registration-count"></span></h3>
+    <div id="registration-list"><p class="muted">正在读取申请…</p></div>
+  </section>
+  <details id="account-editor" class="account-editor">
+    <summary id="account-editor-title">新增账号</summary>
+    <form id="account-form" class="account-form">
+      <input type="hidden" name="id">
+      <label>账号<input name="username" maxlength="60" required></label>
+      <label>密码<input type="password" name="password" autocomplete="new-password" placeholder="编辑时留空则不修改"></label>
+      <label>角色<select name="role" id="account-role"><option value="org">校团委组织部骨干</option><option value="liaison">小组联络员</option><option value="super">校团委组织部</option></select></label>
+      <fieldset id="account-org-scope" class="org-cohort-scope">
+        <legend>授权的培训班/团校</legend>
+        <p id="account-org-help" class="muted">至少选一项，可多选。</p>
+        <div class="cohort-choices"></div>
+      </fieldset>
+      <label class="account-scope hidden">所属培训班/团校<select name="cohortId" id="account-cohort"></select></label>
+      <label class="account-scope hidden">负责小组<select name="groupName"></select></label>
+      <div class="account-form-actions"><button class="primary">保存账号</button> <button class="ghost" type="button" id="account-cancel">取消</button></div>
+    </form>
+  </details>
+  <div class="account-filters">
+    <label>搜索账号<input id="account-search" type="search" placeholder="输入账号名称"></label>
+    <label>角色<select id="account-role-filter"><option value="">所有角色</option><option value="super">校团委组织部</option><option value="org">校团委组织部骨干</option><option value="liaison">小组联络员</option></select></label>
+    <label>培训班/团校<select id="account-cohort-filter"><option value="">不限培训班/团校</option></select></label>
+  </div>
+  <p class="muted account-result-count" id="account-result-count" role="status"></p>
+  <div id="account-list" class="account-list"></div>
+</section>
 </div></section></main>
 
 <dialog id="student-dialog"><form method="dialog" id="student-form"><div class="dialog-head"><div><h2>学员信息</h2><p>带星号的信息用于前台身份核对。</p></div><button class="icon-btn" value="cancel">×</button></div><div class="form-grid"><label>姓名 *<input name="name" required></label><label>院系 *<input name="department" required></label><label>学员类型 *<select name="studentType"><option value="undergraduate">本科生</option><option value="graduate">硕博生</option></select></label><label>组别<input name="groupName"></label><label>小组联络员<input name="groupContact"></label><label>政治面貌<input name="politicalStatus"></label><label class="span-2">所属团支部<input name="leagueBranch"></label><label>手机<input name="phone"></label><label>电子邮箱<input name="email"></label><label class="span-2 inline-check"><input type="checkbox" name="withdrawn">已退出／休学（不计入统计人数）</label><label class="span-2">退出备注<input name="withdrawalNote"></label></div><div class="dialog-actions"><button class="ghost" value="cancel">取消</button><button class="primary" type="submit" value="default">保存</button></div></form></dialog>
 <dialog id="course-dialog"><form method="dialog" id="course-form"><input type="hidden" name="id"><div class="dialog-head"><div><h2>课程设置</h2><p>修改学分会同步影响所有已参加该课程的学员。</p></div><button class="icon-btn" value="cancel">×</button></div><div class="form-grid"><label class="span-2">课程名称<input name="name" required></label><label>课程类别<select name="category"><option value="required">必修课程</option><option value="elective">选修课程</option></select></label><label>课程学分<input name="credits" type="number" min="0" step="0.5" required></label><label>显示顺序<input name="sortOrder" type="number" min="0" required></label></div><div class="dialog-actions"><button class="ghost" value="cancel">取消</button><button class="primary" type="submit" value="default">保存</button></div></form></dialog>
 <dialog id="attendance-dialog" class="wide-dialog"><form method="dialog" id="attendance-form"><input type="hidden" name="studentId"><div class="dialog-head"><div><h2 id="attendance-title">学员课程记录</h2><p>选择未参加、现场出勤、完成补修或特殊课程。</p></div><button class="icon-btn" value="cancel">×</button></div><div id="attendance-list" class="attendance-list"></div><div class="dialog-actions"><button class="ghost" value="cancel">取消</button><button class="primary" type="submit" value="default">保存课程记录</button></div></form></dialog>
+<dialog id="check-in-dialog" class="wide-dialog" aria-labelledby="check-in-title">
+  <form id="check-in-form" class="check-in-form">
+    <div class="dialog-head"><div><h2 id="check-in-title">名单签到</h2><p id="check-in-course"></p></div></div>
+    <div class="check-in-inputs">
+      <label>粘贴姓名名单<textarea name="names" rows="4" maxlength="200000" placeholder="每行一个姓名，也可从 Excel 复制含表头的多列"></textarea></label>
+      <label>或上传名单文件<input name="file" type="file" accept=".xlsx,.xls,.csv,.txt"></label>
+      <p class="muted">Excel 读取首张工作表。多列名单请使用「姓名」表头，可加「院系」「小组」列区分重名。也支持单列姓名名单。</p>
+    </div>
+    <p id="check-in-message" class="check-in-message" role="status"></p>
+    <div id="check-in-preview" hidden></div>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" id="check-in-cancel">关闭</button>
+      <button type="submit" class="secondary" id="check-in-prepare">预览匹配</button>
+      <button type="button" class="primary" id="check-in-confirm" hidden>确认签到</button>
+    </div>
+  </form>
+</dialog>
 <div id="toast" role="status" aria-live="polite"></div><script src="/vendor/xlsx.js"></script><script type="module" src="/app.js"></script></body></html>
