@@ -70,10 +70,72 @@ html:not([data-view="admin"]) #admin-view, html[data-view="admin"] #query-view {
 .query-intro p { max-width: none; margin: 0; color: var(--muted); line-height: 1.7; font-size: .95rem; text-wrap: pretty; }
 .login-card { border-radius: 4px; border: 1px solid var(--line); box-shadow: none; }
 .query-card { min-width: 0; padding: 22px var(--query-inset) clamp(20px, 4vw, 32px); border: 0; border-radius: 0 0 8px 8px; box-shadow: none; }
-#query-form { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); align-items: end; gap: 16px; }
+#query-form { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); align-items: start; gap: 16px; }
 #query-form > label, #query-form fieldset { min-width: 0; margin: 0; }
 #query-form input, #query-form select { font-weight: 400; }
 .query-cohort-field, #query-form > button { grid-column: 1 / -1; }
+.query-select-field { position: relative; min-width: 0; }
+.query-select-field > label { display: block; }
+.query-select-control { position: relative; display: grid; margin-top: 7px; }
+.query-select-trigger {
+  display: flex;
+  justify-content: space-between;
+  align-items: stretch;
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #cbd4dc;
+  border-radius: 4px;
+  background: var(--white);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.query-select-value { align-self: center; min-width: 0; padding: 8px 11px; overflow-wrap: anywhere; }
+.query-select-action {
+  display: grid;
+  place-items: center;
+  padding: 0 11px;
+  border-inline-start: 1px solid var(--line);
+  background: #f4f6f7;
+  color: var(--muted);
+  font-size: .82rem;
+  white-space: nowrap;
+}
+.query-select-trigger[data-empty] .query-select-value { color: var(--muted); }
+.query-select-trigger:hover:not(:disabled), .query-select-trigger[aria-expanded="true"] { border-color: #909ca6; }
+.query-select-trigger:not(:disabled):hover .query-select-action,
+.query-select-trigger[aria-expanded="true"] .query-select-action { color: var(--red); }
+.query-select-trigger:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.query-select-trigger[aria-invalid="true"] { border-color: var(--red); }
+.query-select-trigger:disabled { cursor: default; background: #f4f6f7; }
+.query-select-list {
+  position: absolute;
+  z-index: 5;
+  inset: calc(100% + 4px) 0 auto;
+  box-sizing: border-box;
+  max-height: var(--query-list-height, 17rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 3px;
+  margin: 0;
+  list-style: none;
+  border: 1px solid #cbd4dc;
+  border-radius: 4px;
+  background: var(--white);
+  box-shadow: 0 4px 12px rgba(21, 32, 43, .1);
+}
+.query-select-field[data-opens-up] .query-select-list { inset: auto 0 calc(100% + 4px); }
+.query-select-field:has(.query-select-list:not([hidden])) { z-index: 4; }
+.query-select-list li { position: relative; min-height: 38px; padding: 7px 10px 7px 12px; overflow-wrap: anywhere; cursor: pointer; }
+.query-select-list li + li { border-top: 1px solid #eef1f3; }
+.query-select-list [aria-selected="true"] { color: var(--red); font-weight: 650; }
+.query-select-list [aria-selected="true"]::before { position: absolute; inset: 6px auto 6px 0; width: 2px; background: var(--red); content: ""; }
+.query-select-list [data-active], .query-select-list li:hover { background: #edf1f4; }
+.query-select-error { display: block; margin-top: 4px; color: var(--red); font-size: .82rem; }
+.query-select-field [hidden] { display: none; }
 .query-card .primary { width: auto; justify-self: start; min-width: 9em; margin-top: 4px; }
 .segmented { padding: 0; border-radius: 4px; height: 44px; align-items: stretch; }
 .segmented span { height: 100%; padding: 9px 4px; border-radius: 0; white-space: nowrap; }
@@ -325,5 +387,6 @@ input:not([type="checkbox"],[type="radio"],[type="file"]), select {
 }
 @media (max-width: 460px) {
   #query-form { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  .query-select-list li { min-height: 44px; }
   .query-card .primary { width: 100%; }
 }

@@ -7,6 +7,8 @@ import { dirname, join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import XLSX from "xlsx";
+import { readTrainingWorkbook, studentHeaders } from "../public/training-workbook.js";
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const password="Example-only-2026";
@@ -71,9 +73,9 @@ async function launch(directory) {
 
 function client(origin) {
   let cookie="";
-  return async (path,{method="GET",body,status=200,inspect=false}={})=>{
+  return async (path,{method="GET",body,status=200,inspect=false,headers={}}={})=>{
     const response=await fetch(origin+path,{
-      method,headers:{"Content-Type":"application/json",cookie},
+      method,headers:{"Content-Type":"application/json",cookie,...headers},
       body:body===undefined?undefined:JSON.stringify(body)
     });
     const token=response.headers.get("set-cookie");
@@ -84,6 +86,25 @@ function client(origin) {
     return response.json();
   };
 }
+
+test("legacy workbooks retain known marks and reject mismatched or invalid cells",()=>{
+  const book=XLSX.utils.book_new();
+  const headers=[...studentHeaders,"1031破冰","1115开班","0331耶鲁北大行","0517第三次实务技能培训","示例讲座","总学分"];
+  XLSX.utils.book_append_sheet(book,XLSX.utils.aoa_to_sheet([
+    headers,["一组",1,"示例联络员","旧表学员（休学）","","示例院系","","","",1,2,"2 2/3",0,"",17]
+  ]),"本科组");
+  const parsed=readTrainingWorkbook(book,XLSX);
+  assert.equal(parsed.courses.length,5);
+  assert.equal(parsed.courses[2].credits,2);
+  assert.equal(parsed.courses.at(-1).category,"elective");
+  assert.equal(parsed.students[0].name,"旧表学员");
+  assert.equal(parsed.students[0].withdrawn,true);
+  assert.deepEqual(parsed.attendance.map(row=>row.status),["attended","makeup","special"]);
+  XLSX.utils.book_append_sheet(book,XLSX.utils.aoa_to_sheet([[...studentHeaders,"不同课程"]]),"硕博组");
+  assert.throws(()=>readTrainingWorkbook(book,XLSX),/课程列/);
+  XLSX.utils.sheet_add_aoa(book.Sheets["本科组"],[["误录"]],{origin:"J2"});
+  assert.throws(()=>readTrainingWorkbook(book,XLSX),/出勤标记无效/);
+});
 
 test("migration, attendance permissions, scopes and manager workflows",async t=>{
   const directory=mkdtempSync(join(caseRoot,"pku-credit-regression-"));
@@ -97,7 +118,7 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   legacyFixture(directory);
   cpSync(join(root,"server.mjs"),join(directory,"server.mjs"));
   mkdirSync(join(directory,"public"));
-  for(const asset of ["attendance-policy.js","app.js","index.html","admin.css","styles.css"]) {
+  for(const asset of ["attendance-policy.js","query-select.js","training-workbook.js","app.js","index.html","admin.css","styles.css","pku-seal-v1.png","favicon.svg"]) {
     cpSync(join(root,"public",asset),join(directory,"public",asset));
   }
   symlinkSync(join(root,"node_modules"),join(directory,"node_modules"),process.platform==="win32"?"junction":"dir");
@@ -118,6 +139,7 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   const createLiaison=(username,cohortId,groupName)=>write(admin,"/api/admin/accounts",{username,password,role:"liaison",cohortId,groupName});
 
   await visitor("/",{inspect:true});
+  await visitor("/query-select.js",{inspect:true});
   await visitor("/attendance-policy.js",{inspect:true});
   await visitor("/vendor/",{status:404,inspect:true});
   await visitor("/api/admin/accounts",{status:401});
@@ -138,20 +160,29 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   const first=(await write(admin,"/api/admin/students",student("示例甲","一组"))).id;
   const teammate=(await write(admin,"/api/admin/students",student("示例乙","一组"))).id;
   const different=(await write(admin,"/api/admin/students",student("示例丙","二组"))).id;
-  const withdrawn=(await write(admin,"/api/admin/students",student("已退出学员","一组",{withdrawn:true}))).id;
+  const withdrawn=(await write(admin,"/api/admin/students",student("已退出学员","一组",{withdrawn:true,withdrawalNote:"赴外地"}))).id;
+  await write(admin,"/api/admin/students",student("已退出学员","一组"),409);
   await write(admin,"/api/admin/settings",{undergraduate:3,graduate:4,required:3});
+  await write(admin,"/api/admin/settings",{undergraduate:"",graduate:4,required:3},400);
   await createLiaison("liaison-one",1,"一组");
   await createLiaison("liaison-two",1,"二组");
   await write(admin,"/api/admin/accounts",{username:"test-org",password,role:"org",cohortIds:[1]});
   await write(admin,"/api/admin/accounts",{username:"wrong-group",password,role:"liaison",cohortId:1,groupName:"不存在"},400);
 
   await login(admin,"test-super",second);
+  const idAtSecond=(await dashboard(admin)).user.id;
+  await admin("/api/admin/settings",{method:"POST",body:{undergraduate:99,graduate:99,required:99},
+    headers:{"X-PKU-Admin-Scope":idAtSecond+":1"},status:409});
+  assert.equal((await dashboard(admin)).thresholds.undergraduate,10);
   const elsewhere=(await write(admin,"/api/admin/students",student("示例甲","一组"))).id;
   assert.notEqual(elsewhere,first);
   await write(admin,"/api/admin/courses",{courseKey:"elsewhere",name:"异班课程",category:"required",credits:3,sortOrder:1});
   const crossCourse=(await dashboard(admin)).courses[0].id;
   await createLiaison("liaison-other",second,"一组");
   await login(admin,"test-super");
+  await write(admin,"/api/admin/cohorts",{name:"测试团校 B"},409);
+  await write(admin,"/api/admin/courses",{id:crossCourse,name:"越界课程",category:"required",credits:2,sortOrder:1},404);
+  await admin("/api/admin/courses/"+crossCourse,{method:"DELETE",status:404});
   await login(org,"test-org");
   await login(liaison,"liaison-one");
   await login(peer,"liaison-two");
@@ -225,13 +256,51 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   assert.equal(query.phone,undefined);
   assert.equal((await dashboard(admin)).stats.withdrawn,1);
   await liaison("/api/admin/export.xlsx",{status:403});
+  const home=await visitor("/",{inspect:true});
+  assert.doesNotMatch(await home.text(),/<script[^>]+src="\/vendor\/xlsx\.js"/);
+  const template=await admin("/api/admin/template.xlsx",{inspect:true});
+  const templateData=readTrainingWorkbook(XLSX.read(await template.arrayBuffer(),{type:"array"}),XLSX);
+  assert.deepEqual(templateData.courses.map(course=>[course.category,course.credits]),[["required",2],["elective",3]]);
+  // A stopped course is outside the export. Its historical attendance must survive re-import.
+  await saveStudent(admin,first,elective,"attended","");
+  await admin("/api/admin/courses/"+elective,{method:"DELETE"});
+  const pausedStudent=await admin(studentPath(first));
+  assert.equal(pausedStudent.student.courseCount,1);
+  assert.equal(pausedStudent.student.totalCredits,3);
   const exported=await admin("/api/admin/export.xlsx",{inspect:true});
-  assert.ok((await exported.arrayBuffer()).byteLength>1000);
+  const restored=readTrainingWorkbook(XLSX.read(await exported.arrayBuffer(),{type:"array"}),XLSX);
+  assert.deepEqual(restored.thresholds,{undergraduate:3,graduate:4,required:3});
+  assert.ok(restored.courses.some(course=>course.name==="必修"&&course.credits===3&&course.storageKey==="required"));
+  assert.ok(restored.students.some(row=>row.name==="已退出学员"&&row.withdrawn&&row.withdrawalNote==="赴外地"));
+  await write(admin,"/api/admin/settings",{undergraduate:20,graduate:24,required:6});
+  await write(admin,"/api/admin/import-full",restored);
+  assert.deepEqual((await dashboard(admin)).thresholds,restored.thresholds);
+  assert.equal((await dashboard(admin)).courses.find(course=>course.name==="必修").id,required);
+  assert.equal((await admin(studentPath(withdrawn))).student.withdrawalNote,"赴外地");
+  await write(admin,"/api/admin/import-full",{...restored,attendance:[...restored.attendance,{studentKey:"missing",courseKey:"course_01",status:"makeup"}]},400);
+  assert.equal((await admin(studentPath(first))).student.totalCredits,3);
+  assert.deepEqual((await dashboard(liaison)).user.attendancePolicy,allCoursesPolicy);
+  await write(admin,"/api/admin/courses",{id:elective,name:"选修",category:"elective",credits:2,sortOrder:2});
+  assert.equal((await admin(studentPath(first))).student.totalCredits,5);
+  await saveStudent(admin,first,elective,"","attended");
+  await admin(studentPath(teammate),{method:"DELETE"});
+  await admin(studentPath(teammate),{status:404});
 
+  await login(org,"test-org",second,403);
+  await write(admin,"/api/admin/accounts",{id:byName["test-org"],username:"test-org",role:"org",cohortIds:[1,second]});
+  await login(org,"test-org",second);
+  await write(admin,"/api/admin/accounts",{id:byName["test-org"],username:"test-org",role:"org",cohortIds:[1]});
+  await org("/api/admin/dashboard",{status:401});
+  await admin("/api/admin/accounts/"+byName["test-org"],{method:"DELETE"});
+  await login(org,"test-org",1,401);
+
+  await write(admin,"/api/admin/cohorts",{id:1,name:"已改名测试培训班"});
   await service.stop();
   service=await launch(directory);
   const afterRestart=client(service.origin);
   await login(afterRestart,"liaison-one");
+  assert.equal((await dashboard(afterRestart)).cohort.name,"已改名测试培训班");
+  assert.equal((await afterRestart("/api/meta")).cohorts.length,2);
   assert.deepEqual((await dashboard(afterRestart)).user.attendancePolicy,allCoursesPolicy);
   assert.equal((await afterRestart(studentPath(5))).student.totalCredits,2);
   assert.equal((await afterRestart(studentPath(first))).student.totalCredits,3);

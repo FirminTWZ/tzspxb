@@ -32,10 +32,19 @@
   </div>
   <div class="query-card">
     <form id="query-form" method="post" action="/api/query">
-      <label class="query-cohort-field">培训班/团校<select name="cohortId" id="query-cohort" required><option value="">请选择培训班/团校</option></select></label>
+      <div class="query-select-field query-cohort-field">
+        <label id="query-cohort-label" for="query-cohort">培训班/团校</label>
+        <select name="cohortId" id="query-cohort" required><option value="">请选择培训班/团校</option></select>
+      </div>
       <label>姓名<input name="name" maxlength="40" autocomplete="name" placeholder="请输入姓名" required></label>
-      <label>院系<select name="department" id="department-select" required><option value="">请选择院系</option></select></label>
-      <label>所属小组<select name="groupName" id="group-select" required><option value="">请选择所属小组</option></select></label>
+      <div class="query-select-field">
+        <label id="department-select-label" for="department-select">院系</label>
+        <select name="department" id="department-select" required><option value="">请选择院系</option></select>
+      </div>
+      <div class="query-select-field">
+        <label id="group-select-label" for="group-select">所属小组</label>
+        <select name="groupName" id="group-select" required><option value="">请选择所属小组</option></select>
+      </div>
       <fieldset><legend>学员类型</legend><div class="segmented"><label><input type="radio" name="studentType" value="undergraduate" checked><span>本科生</span></label><label><input type="radio" name="studentType" value="graduate"><span>硕博生</span></label></div></fieldset>
       <button class="primary full">查询记录</button>
     </form>
@@ -223,4 +232,4 @@
     </div>
   </form>
 </dialog>
-<div id="toast" role="status" aria-live="polite"></div><script src="/vendor/xlsx.js"></script><script type="module" src="/app.js"></script></body></html>
+<div id="toast" role="status" aria-live="polite"></div><script type="module" src="/app.js"></script></body></html>

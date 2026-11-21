@@ -6,6 +6,7 @@ import { randomBytes, timingSafeEqual, scryptSync } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import XLSX from "xlsx";
 import { attendanceOptions, legacyAttendancePolicy, normalizeAttendancePolicy } from "./public/attendance-policy.js";
+import { studentHeaders, withdrawalHeaders } from "./public/training-workbook.js";
 
 const ROOT=dirname(fileURLToPath(import.meta.url));
 const DATA_DIR=join(ROOT,"data");
@@ -14,12 +15,14 @@ const db=new DatabaseSync(join(DATA_DIR,"credits.db"));
 db.exec(`PRAGMA journal_mode=WAL;CREATE TABLE IF NOT EXISTS records(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,department TEXT NOT NULL,student_type TEXT NOT NULL CHECK(student_type IN ('undergraduate','graduate')),credits REAL NOT NULL DEFAULT 0,note TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,cohort_id INTEGER NOT NULL DEFAULT 1,UNIQUE(cohort_id,name,department,student_type));CREATE INDEX IF NOT EXISTS idx_records_lookup ON records(name,department,student_type);CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);INSERT OR IGNORE INTO settings VALUES('threshold_undergraduate','10');INSERT OR IGNORE INTO settings VALUES('threshold_graduate','10');`);
 function ensureColumn(table,name,definition){const cols=db.prepare(`PRAGMA table_info(${table})`).all().map(r=>r.name);if(!cols.includes(name))db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`)}
 ensureColumn("records","group_name","TEXT NOT NULL DEFAULT ''");ensureColumn("records","group_contact","TEXT NOT NULL DEFAULT ''");ensureColumn("records","political_status","TEXT NOT NULL DEFAULT ''");ensureColumn("records","league_branch","TEXT NOT NULL DEFAULT ''");ensureColumn("records","phone","TEXT NOT NULL DEFAULT ''");ensureColumn("records","email","TEXT NOT NULL DEFAULT ''");ensureColumn("records","withdrawn","INTEGER NOT NULL DEFAULT 0");ensureColumn("records","withdrawal_note","TEXT NOT NULL DEFAULT ''");ensureColumn("records","source_total","REAL");
-db.exec("CREATE TABLE IF NOT EXISTS cohorts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,active INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);INSERT OR IGNORE INTO cohorts(name) VALUES('北京大学2025级团支书培训班');");
+db.exec("CREATE TABLE IF NOT EXISTS cohorts(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,active INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);INSERT INTO cohorts(name) SELECT '北京大学2025级团支书培训班' WHERE NOT EXISTS(SELECT 1 FROM cohorts);");
 ensureColumn("records","cohort_id","INTEGER NOT NULL DEFAULT 1");
 migrateStudentIdentity();
 db.exec(`CREATE TABLE IF NOT EXISTS courses(id INTEGER PRIMARY KEY AUTOINCREMENT,course_key TEXT NOT NULL UNIQUE,name TEXT NOT NULL,category TEXT NOT NULL CHECK(category IN ('required','elective')),credits REAL NOT NULL CHECK(credits>=0),sort_order INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,source_header TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_courses_order ON courses(sort_order);CREATE TABLE IF NOT EXISTS attendance(id INTEGER PRIMARY KEY AUTOINCREMENT,student_id INTEGER NOT NULL REFERENCES records(id) ON DELETE CASCADE,course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,status TEXT NOT NULL CHECK(status IN ('attended','makeup','special')),source_mark TEXT NOT NULL DEFAULT '',credit_override REAL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(student_id,course_id));CREATE INDEX IF NOT EXISTS idx_attendance_student ON attendance(student_id);CREATE INDEX IF NOT EXISTS idx_attendance_course ON attendance(course_id);PRAGMA foreign_keys=ON;PRAGMA optimize;`);
 ensureColumn("attendance","credit_override","REAL");
 ensureColumn("courses","cohort_id","INTEGER NOT NULL DEFAULT 1");
+db.exec(`CREATE INDEX IF NOT EXISTS idx_records_cohort_group ON records(cohort_id,group_name);
+ CREATE INDEX IF NOT EXISTS idx_courses_cohort_order ON courses(cohort_id,sort_order,id);`);
 db.exec("UPDATE courses SET course_key=cohort_id||':'||course_key WHERE instr(course_key,':')=0;");
 db.exec(`CREATE TABLE IF NOT EXISTS cohort_settings(cohort_id INTEGER PRIMARY KEY,threshold_undergraduate REAL NOT NULL DEFAULT 10,threshold_graduate REAL NOT NULL DEFAULT 10,threshold_required REAL NOT NULL DEFAULT 0);CREATE TABLE IF NOT EXISTS admin_accounts(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('super','org','liaison')),cohort_id INTEGER,group_name TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);CREATE INDEX IF NOT EXISTS idx_admin_scope ON admin_accounts(role,cohort_id,group_name);`);
 function passwordHash(password,salt=randomBytes(16).toString("hex")){return `${salt}:${scryptSync(String(password),salt,64).toString("hex")}`}
@@ -114,9 +117,27 @@ function transaction(work) {
  }
 }
 const mime={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".svg":"image/svg+xml",".png":"image/png"};
+class InputError extends Error {
+ constructor(message,status=400) {
+  super(message);
+  this.status=status;
+ }
+}
 function json(res,status,value,headers={}){res.writeHead(status,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store",...headers});res.end(JSON.stringify(value))}
 function binary(res,buffer,filename){res.writeHead(200,{"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,"Content-Length":buffer.length,"Cache-Control":"no-store"});res.end(buffer)}
-async function body(req,limit=14_000_000){const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>limit)throw new Error("请求内容过大");chunks.push(c)}return chunks.length?JSON.parse(Buffer.concat(chunks).toString("utf8")):{} }
+async function body(req,limit=14_000_000) {
+ const chunks=[];
+ let size=0;
+ for await(const chunk of req) {
+  size+=chunk.length;
+  if(size>limit) throw new InputError("请求内容过大",413);
+  chunks.push(chunk);
+ }
+ if(!chunks.length) return {};
+ const value=JSON.parse(Buffer.concat(chunks).toString("utf8"));
+ if(!value||typeof value!=="object"||Array.isArray(value)) throw new InputError("请求数据格式不正确");
+ return value;
+}
 function token(req){return(req.headers.cookie||"").split(";").map(v=>v.trim()).find(v=>v.startsWith("pku_admin="))?.slice(10)||""}
 function adminSession(req) {
  const key=token(req), session=sessions.get(key);
@@ -130,7 +151,19 @@ function adminSession(req) {
  }
  return {...session,user:current};
 }
-function requireAdmin(req,res){const s=adminSession(req);if(!s){json(res,401,{error:"请先登录管理员后台"});return null}return s}
+function requireAdmin(req,res) {
+ const session=adminSession(req);
+ if(!session) {
+  json(res,401,{error:"请先登录管理员后台"});
+  return null;
+ }
+ const scope=req.headers["x-pku-admin-scope"];
+ if(scope && scope!==session.user.id+":"+session.cohortId) {
+  json(res,409,{error:"另一标签页已切换账号或培训班/团校，请刷新后核对再操作"});
+  return null;
+ }
+ return session;
+}
 function requireWrite(req,res){const s=requireAdmin(req,res);if(!s)return null;if(s.user.role==="liaison"){json(res,403,{error:"此操作仅限培训班/团校管理员"});return null}return s}
 function requireSuper(req,res){const s=requireAdmin(req,res);if(!s)return null;if(s.user.role!=="super"){json(res,403,{error:"只有校团委组织部账号可以管理账号与权限"});return null}return s}
 function safeEqual(a,b){const aa=Buffer.from(String(a)),bb=Buffer.from(String(b));return aa.length===bb.length&&timingSafeEqual(aa,bb)}
@@ -160,11 +193,27 @@ function listRegistrations() {
 }
 function str(v,max=300){return String(v??"").trim().slice(0,max)}
 function validType(v){return v==="undergraduate"||v==="graduate"?v:""}
-function cleanStudent(v){const s={name:str(v.name,40),department:str(v.department,80),studentType:validType(v.studentType),groupName:str(v.groupName,40),groupContact:str(v.groupContact,40),politicalStatus:str(v.politicalStatus,40),leagueBranch:str(v.leagueBranch,160),phone:str(v.phone,40),email:str(v.email,120),withdrawn:v.withdrawn?1:0,withdrawalNote:str(v.withdrawalNote,100),sourceTotal:v.sourceTotal===""||v.sourceTotal==null?null:Number(v.sourceTotal),note:str(v.note,300)};if(!s.name||!s.department||!s.studentType)throw new Error("学员姓名、院系和类型不能为空");if(s.sourceTotal!=null&&!Number.isFinite(s.sourceTotal))s.sourceTotal=null;return s}
-function cleanCourse(v){const c={id:v.id?Number(v.id):null,key:str(v.courseKey,80),name:str(v.name,120),category:v.category==="elective"?"elective":v.category==="required"?"required":"",credits:Number(v.credits),sortOrder:Number(v.sortOrder||0),active:v.active===false||v.active===0?0:1,sourceHeader:str(v.sourceHeader,160)};if(!c.name||!c.category||!Number.isFinite(c.credits)||c.credits<0||c.credits>1000)throw new Error("课程名称、类型或学分无效");if(!c.key)c.key=c.id?`course_${c.id}`:`manual_${Date.now()}_${randomBytes(3).toString("hex")}`;return c}
-const creditExpr=`COALESCE((SELECT SUM(COALESCE(a.credit_override,c.credits)) FROM attendance a JOIN courses c ON c.id=a.course_id WHERE a.student_id=r.id AND c.active=1),0)`;
-const requiredExpr=`COALESCE((SELECT SUM(COALESCE(a.credit_override,c.credits)) FROM attendance a JOIN courses c ON c.id=a.course_id WHERE a.student_id=r.id AND c.active=1 AND c.category='required'),0)`;
-function studentRows(cohortId,groupName=""){const where=groupName?"r.cohort_id=? AND r.group_name=?":"r.cohort_id=?",args=groupName?[cohortId,groupName]:[cohortId];return db.prepare(`SELECT r.id,r.name,r.department,r.student_type AS studentType,r.group_name AS groupName,r.group_contact AS groupContact,r.political_status AS politicalStatus,r.league_branch AS leagueBranch,r.phone,r.email,r.withdrawn,r.withdrawal_note AS withdrawalNote,r.source_total AS sourceTotal,r.note,r.updated_at AS updatedAt,${creditExpr} AS totalCredits,${requiredExpr} AS requiredCredits,(SELECT COUNT(*) FROM attendance a WHERE a.student_id=r.id) AS courseCount FROM records r WHERE ${where} ORDER BY r.student_type,r.group_name,r.department,r.name`).all(...args)}
+function cleanStudent(v){if(!v||typeof v!=="object")throw new InputError("学员信息无效");const s={name:str(v.name,40),department:str(v.department,80),studentType:validType(v.studentType),groupName:str(v.groupName,40),groupContact:str(v.groupContact,40),politicalStatus:str(v.politicalStatus,40),leagueBranch:str(v.leagueBranch,160),phone:str(v.phone,40),email:str(v.email,120),withdrawn:v.withdrawn?1:0,withdrawalNote:str(v.withdrawalNote,100),sourceTotal:v.sourceTotal===""||v.sourceTotal==null?null:Number(v.sourceTotal),note:str(v.note,300)};if(!s.name||!s.department||!s.studentType)throw new InputError("学员姓名、院系和类型不能为空");if(s.sourceTotal!=null&&!Number.isFinite(s.sourceTotal))s.sourceTotal=null;return s}
+function cleanCourse(v){if(!v||typeof v!=="object")throw new InputError("课程信息无效");const c={id:v.id?Number(v.id):null,key:str(v.courseKey,80),name:str(v.name,120),category:v.category==="elective"?"elective":v.category==="required"?"required":"",credits:Number(v.credits),sortOrder:Number(v.sortOrder||0),active:v.active===false||v.active===0?0:1,sourceHeader:str(v.sourceHeader,160)};if((c.id!==null&&(!Number.isSafeInteger(c.id)||c.id<1))||!Number.isSafeInteger(c.sortOrder)||c.sortOrder<0||str(v.credits)===""||!c.name||!c.category||!Number.isFinite(c.credits)||c.credits<0||c.credits>1000)throw new InputError("课程名称、类型、学分或排序无效");if(!c.key)c.key=c.id?`course_${c.id}`:`manual_${Date.now()}_${randomBytes(3).toString("hex")}`;return c}
+const studentFields=`r.id,r.name,r.department,r.student_type AS studentType,r.group_name AS groupName,
+ r.group_contact AS groupContact,r.political_status AS politicalStatus,r.league_branch AS leagueBranch,
+ r.phone,r.email,r.withdrawn,r.withdrawal_note AS withdrawalNote,r.source_total AS sourceTotal,
+ r.note,r.updated_at AS updatedAt`;
+function studentRows(cohortId,groupName="",studentId=null) {
+ const filters=["r.cohort_id=?"], args=[cohortId];
+ if (groupName) { filters.push("r.group_name=?"); args.push(groupName); }
+ if (studentId!==null) { filters.push("r.id=?"); args.push(studentId); }
+ return db.prepare(`SELECT ${studentFields},
+  COALESCE(SUM(CASE WHEN c.id IS NOT NULL THEN COALESCE(a.credit_override,c.credits) END),0) AS totalCredits,
+  COALESCE(SUM(CASE WHEN c.category='required' THEN COALESCE(a.credit_override,c.credits) END),0) AS requiredCredits,
+  COUNT(c.id) AS courseCount
+ FROM records r LEFT JOIN attendance a ON a.student_id=r.id
+ LEFT JOIN courses c ON c.id=a.course_id AND c.cohort_id=r.cohort_id AND c.active=1
+ WHERE ${filters.join(" AND ")}
+ GROUP BY r.id ORDER BY r.student_type,r.group_name,r.department,r.name`).all(...args);
+}
+
+
 function courseRows(cohortId){return db.prepare("SELECT id,course_key AS courseKey,name,category,credits,sort_order AS sortOrder,active,source_header AS sourceHeader,updated_at AS updatedAt FROM courses WHERE cohort_id=? ORDER BY sort_order,id").all(cohortId)}
 function completionProgress(student, courses, attended, limits) {
  const totalLimit=limits[student.studentType], requiredLimit=limits.required;
@@ -291,7 +340,7 @@ function dashboard(session) {
   };
  };
  return {
-  cohort,user:publicUser(session.user),records:all,courses,thresholds:t,
+  cohort,user:publicUser(session.user),records:all,courses,thresholds:t,features:{workbookRoundTrip:true},
   stats:{
    total:summarize(active),
    undergraduate:summarize(active.filter(row=>row.studentType==="undergraduate")),
@@ -300,14 +349,130 @@ function dashboard(session) {
   }
  };
 }
-function upsertStudent(s,cohortId){db.prepare(`INSERT INTO records(name,department,student_type,credits,note,group_name,group_contact,political_status,league_branch,phone,email,withdrawn,withdrawal_note,source_total,cohort_id,updated_at) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(cohort_id,name,department,student_type) DO UPDATE SET note=excluded.note,group_name=excluded.group_name,group_contact=excluded.group_contact,political_status=excluded.political_status,league_branch=excluded.league_branch,phone=excluded.phone,email=excluded.email,withdrawn=excluded.withdrawn,withdrawal_note=excluded.withdrawal_note,source_total=excluded.source_total,updated_at=CURRENT_TIMESTAMP WHERE records.cohort_id=excluded.cohort_id`).run(s.name,s.department,s.studentType,s.note,s.groupName,s.groupContact,s.politicalStatus,s.leagueBranch,s.phone,s.email,s.withdrawn,s.withdrawalNote,s.sourceTotal,cohortId);return db.prepare("SELECT id FROM records WHERE name=? AND department=? AND student_type=? AND cohort_id=?").get(s.name,s.department,s.studentType,cohortId).id}
+function upsertStudent(s,cohortId){return db.prepare(`INSERT INTO records(name,department,student_type,credits,note,group_name,group_contact,political_status,league_branch,phone,email,withdrawn,withdrawal_note,source_total,cohort_id,updated_at) VALUES(?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(cohort_id,name,department,student_type) DO UPDATE SET note=COALESCE(NULLIF(excluded.note,''),records.note),group_name=excluded.group_name,group_contact=excluded.group_contact,political_status=excluded.political_status,league_branch=excluded.league_branch,phone=excluded.phone,email=excluded.email,withdrawn=excluded.withdrawn,withdrawal_note=excluded.withdrawal_note,source_total=COALESCE(excluded.source_total,records.source_total),updated_at=CURRENT_TIMESTAMP RETURNING id`).get(s.name,s.department,s.studentType,s.note,s.groupName,s.groupContact,s.politicalStatus,s.leagueBranch,s.phone,s.email,s.withdrawn,s.withdrawalNote,s.sourceTotal,cohortId).id}
 
-function workbookBuffer(cohortId,template=false){
- const wb=XLSX.utils.book_new(),courses=template?[{id:0,name:"必修课程1",category:"required",credits:2},{id:-1,name:"必修课程2",category:"required",credits:2},{id:-2,name:"必修课程3",category:"required",credits:2},{id:-3,name:"必修课程4",category:"required",credits:2},{id:-4,name:"选修课程1",category:"elective",credits:3}]:courseRows(cohortId).filter(c=>c.active),headers=["组别","序号","小组联络员","姓名","政治面貌","院系","所属团支部","手机","电子邮箱",...courses.map(c=>c.name)];
- for(const type of ["undergraduate","graduate"]){const rows=[headers];if(!template){const students=db.prepare("SELECT * FROM records WHERE cohort_id=? AND student_type=? ORDER BY group_name,name").all(cohortId,type),attendance=db.prepare("SELECT student_id,course_id,status,source_mark FROM attendance").all(),map=new Map(attendance.map(a=>[`${a.student_id}:${a.course_id}`,a]));students.forEach((s,i)=>rows.push([s.group_name,i+1,s.group_contact,s.name+(s.withdrawn?`（${s.withdrawal_note||"退出"}）`:""),s.political_status,s.department,s.league_branch,s.phone,s.email,...courses.map(c=>{const a=map.get(`${s.id}:${c.id}`);return a?.status==="special"?(a.source_mark||"2 2/3"):a?.status==="makeup"?2:a?.status==="attended"?1:""})]))}const ws=XLSX.utils.aoa_to_sheet(rows);ws["!cols"]=headers.map((_,i)=>({wch:i===3||i>=9?22:16}));XLSX.utils.book_append_sheet(wb,ws,type==="undergraduate"?"本科组":"硕博组")}
- const courseSheet=XLSX.utils.aoa_to_sheet([["课程名称","课程类型","标准学分","排序"],...courses.map((c,i)=>[c.name,c.category==="required"?"必修":"选修",c.credits,c.sortOrder??i+1])]);XLSX.utils.book_append_sheet(wb,courseSheet,"课程设置");
- if(!template){const t=thresholds(cohortId),students=studentRows(cohortId).map(r=>({...r,completed:!r.withdrawn&&r.totalCredits>=t[r.studentType]&&r.requiredCredits>=t.required})),summary=XLSX.utils.aoa_to_sheet([["姓名","院系","学员类型","组别","总学分","必修学分","是否结业","是否退出","退出备注"],...students.map(r=>[r.name,r.department,r.studentType==="undergraduate"?"本科生":"硕博生",r.groupName,r.totalCredits,r.requiredCredits,r.completed?"是":"否",r.withdrawn?"是":"否",r.withdrawalNote])]),settings=XLSX.utils.aoa_to_sheet([["本科生结业学分","硕博生结业学分","必修课结业学分"],[t.undergraduate,t.graduate,t.required]]);XLSX.utils.book_append_sheet(wb,summary,"学员汇总");XLSX.utils.book_append_sheet(wb,settings,"结业设置")}
- return XLSX.write(wb,{type:"buffer",bookType:"xlsx"})}
+function workbookBuffer(cohortId,template=false) {
+ const wb=XLSX.utils.book_new();
+ const courses=template?[
+  {name:"必修课程示例",category:"required",credits:2,sortOrder:1},
+  {name:"选修课程示例",category:"elective",credits:3,sortOrder:2}
+ ]:courseRows(cohortId).filter(course=>course.active);
+ const headers=[...studentHeaders,...courses.map(course=>course.name),...withdrawalHeaders];
+ const students=template?[]:studentRows(cohortId);
+ const attendance=template?[]:db.prepare(`SELECT a.student_id AS studentId,a.course_id AS courseId,a.status
+  FROM records r JOIN attendance a ON a.student_id=r.id JOIN courses c ON c.id=a.course_id
+  WHERE r.cohort_id=? AND c.cohort_id=? AND c.active=1`).all(cohortId,cohortId);
+ const marks=new Map(attendance.map(row=>[row.studentId+":"+row.courseId,
+  row.status==="special"?"2 2/3":row.status==="makeup"?2:1]));
+ for(const [type,sheetName] of [["undergraduate","本科组"],["graduate","硕博组"]]) {
+  const rows=students.filter(student=>student.studentType===type).map((s,index)=>[
+   s.groupName,index+1,s.groupContact,s.name,s.politicalStatus,s.department,s.leagueBranch,s.phone,s.email,
+   ...courses.map(course=>marks.get(s.id+":"+course.id)??""),s.withdrawn?"是":"否",s.withdrawalNote
+  ]);
+  const sheet=XLSX.utils.aoa_to_sheet([headers,...rows]);
+  sheet["!cols"]=headers.map((_,index)=>({wch:index===3||index>=9?22:16}));
+  XLSX.utils.book_append_sheet(wb,sheet,sheetName);
+ }
+ XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
+  ["课程名称","课程类型","标准学分","排序","课程标识（导出后保留）"],
+  ...courses.map(course=>[course.name,course.category==="required"?"必修":"选修",
+   course.credits,course.sortOrder,course.courseKey?.replace(/^\d+:/,"")??""])
+ ]),"课程设置");
+ if(!template) {
+  const t=thresholds(cohortId);
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
+   ["姓名","院系","学员类型","组别","总学分","必修学分","是否结业","是否退出","退出备注"],
+   ...students.map(r=>[r.name,r.department,r.studentType==="undergraduate"?"本科生":"硕博生",r.groupName,
+    r.totalCredits,r.requiredCredits,!r.withdrawn&&r.totalCredits>=t[r.studentType]&&r.requiredCredits>=t.required?"是":"否",
+    r.withdrawn?"是":"否",r.withdrawalNote])
+  ]),"学员汇总");
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([
+   ["本科生结业学分","硕博生结业学分","必修课结业学分"],[t.undergraduate,t.graduate,t.required]
+  ]),"结业设置");
+ }
+ return XLSX.write(wb,{type:"buffer",bookType:"xlsx",compression:true});
+}
+
+function setThresholds(cohortId, settings) {
+ const values=["undergraduate","graduate","required"].map(key=>
+  str(settings?.[key])===""?NaN:Number(settings[key]));
+ if(values.some(value=>!Number.isFinite(value)||value<0||value>10000)) throw new InputError("结业学分无效");
+ db.prepare(`INSERT INTO cohort_settings(cohort_id,threshold_undergraduate,threshold_graduate,threshold_required)
+  VALUES(?,?,?,?) ON CONFLICT(cohort_id) DO UPDATE SET threshold_undergraduate=excluded.threshold_undergraduate,
+  threshold_graduate=excluded.threshold_graduate,threshold_required=excluded.threshold_required`).run(cohortId,...values);
+}
+
+function importTrainingData(cohortId, payload) {
+ if(!Array.isArray(payload?.students)||!Array.isArray(payload?.courses)||!Array.isArray(payload?.attendance)) {
+  throw new InputError("导入数据结构不正确");
+ }
+ const {students,courses,attendance}=payload;
+ if(!(students.length||courses.length)) throw new InputError("文件中没有可导入的学员或课程");
+ if(students.length>3000||courses.length>1000||attendance.length>100000) throw new InputError("导入数据量过大",413);
+ const existingCourses=courseRows(cohortId), byStoredKey=new Map(existingCourses.map(course=>[course.courseKey,course]));
+ const coursesByName=new Map();
+ for(const course of existingCourses) {
+  if(!coursesByName.has(course.name)) coursesByName.set(course.name,[]);
+  coursesByName.get(course.name).push(course);
+ }
+ const courseKeys=new Set(), destinationKeys=new Set();
+ const parsedCourses=courses.map(raw=>{
+  const key=str(raw?.courseKey,80);
+  if(!key||courseKeys.has(key)) throw new InputError("课程列标识缺失或重复");
+  courseKeys.add(key);
+  const course=cleanCourse(raw);
+  const rawStorageKey=raw.storageKey===null?"":str(raw.storageKey??raw.courseKey,80);
+  const storageKey=rawStorageKey?cohortId+":"+rawStorageKey:"";
+  const named=coursesByName.get(course.name)??[];
+  const byKey=byStoredKey.get(storageKey);
+  // Exported identifiers are explicit. Legacy column keys can move when a sheet is rearranged.
+  const explicit=raw.storageKey!=null && raw.storageKey!=="";
+  if(!byKey && named.length>1) throw new InputError("系统中有多门同名课程「"+course.name+"」，请在工作簿中保留课程标识");
+  const match=explicit&&byKey?byKey:(named.length===1?named[0]:byKey);
+  const destination=match?.courseKey||storageKey||cohortId+":xlsx_"+randomBytes(8).toString("hex");
+  if(destinationKeys.has(destination)) throw new InputError("两列课程匹配到同一门课，请检查课程名称和标识");
+  destinationKeys.add(destination);
+  return {course,key,destination};
+ });
+ const studentKeys=new Set(), identities=new Set();
+ const parsedStudents=students.map(raw=>{
+  const key=str(raw?.importKey,200), student=cleanStudent(raw);
+  const identity=JSON.stringify([student.studentType,student.department,student.name]);
+  if(!key||studentKeys.has(key)||identities.has(identity)) throw new InputError("导入文件中有重复的学员记录，请核对姓名、院系和类型");
+  studentKeys.add(key);
+  identities.add(identity);
+  return {student,key};
+ });
+ const checkedAttendance=new Set();
+ for(const row of attendance) {
+  const pair=JSON.stringify([row?.studentKey,row?.courseKey]);
+  if(!studentKeys.has(row?.studentKey)||!courseKeys.has(row?.courseKey)
+     ||!["attended","makeup","special"].includes(row?.status)||checkedAttendance.has(pair)) {
+   throw new InputError("出勤记录包含重复行或无法匹配的课程、学员");
+  }
+  checkedAttendance.add(pair);
+ }
+ return transaction(()=>{
+  if(payload.thresholds!==undefined) setThresholds(cohortId,payload.thresholds);
+  const saveCourse=db.prepare(`INSERT INTO courses(course_key,name,category,credits,sort_order,active,source_header,cohort_id)
+   VALUES(?,?,?,?,?,1,?,?) ON CONFLICT(course_key) DO UPDATE SET name=excluded.name,category=excluded.category,
+   credits=excluded.credits,sort_order=excluded.sort_order,active=1,source_header=excluded.source_header,
+   updated_at=CURRENT_TIMESTAMP RETURNING id`);
+  const courseIds=new Map(parsedCourses.map(({course,key,destination})=>[key,
+   saveCourse.get(destination,course.name,course.category,course.credits,course.sortOrder,course.sourceHeader,cohortId).id]));
+  const importedIds=[...courseIds.values()];
+  const remove=importedIds.length?db.prepare("DELETE FROM attendance WHERE student_id=? AND course_id IN ("+
+   importedIds.map(()=>"?").join(",")+")"):null;
+  const studentIds=new Map(parsedStudents.map(({student,key})=>{
+   const id=upsertStudent(student,cohortId);
+   if(remove) remove.run(id,...importedIds);
+   return [key,id];
+  }));
+  const insert=db.prepare("INSERT INTO attendance(student_id,course_id,status,source_mark,credit_override) VALUES(?,?,?,?,?)");
+  for(const row of attendance) insert.run(studentIds.get(row.studentKey),courseIds.get(row.courseKey),row.status,str(row.sourceMark,30),row.status==="special"?8:null);
+  return {ok:true,students:students.length,courses:courses.length,attendance:attendance.length};
+ });
+}
 
 async function api(req,res,url){try{
 if(req.method==="POST"&&url.pathname==="/api/admin/register"){
@@ -378,7 +543,24 @@ if(req.method==="POST"&&reviewMatch){
  return json(res,200,{ok:true});
 }
 if(req.method==="GET"&&url.pathname==="/api/meta"){const cohorts=db.prepare("SELECT id,name FROM cohorts WHERE active=1 ORDER BY id DESC").all(),cohortId=Number(url.searchParams.get("cohortId")),departments=cohortId?db.prepare("SELECT DISTINCT department FROM records WHERE cohort_id=? ORDER BY department COLLATE NOCASE").all(cohortId).map(r=>r.department):[],groups=cohortId?db.prepare("SELECT DISTINCT group_name AS name FROM records WHERE cohort_id=? AND trim(group_name)<>'' ORDER BY group_name COLLATE NOCASE").all(cohortId).map(r=>r.name):[];return json(res,200,{cohorts,departments,groups,thresholds:cohortId?thresholds(cohortId):null})}
-if(req.method==="POST"&&url.pathname==="/api/query"){const d=await body(req),name=str(d.name,40),department=str(d.department,80),groupName=str(d.groupName,40),studentType=validType(d.studentType),cohortId=Number(d.cohortId);if(!name||!department||!groupName||!studentType||!cohortId)return json(res,400,{error:"请选择培训班、所属小组，并填写姓名、院系和学员类型"});const student=db.prepare(`SELECT r.id,r.name,r.department,r.student_type AS studentType,r.withdrawn,${creditExpr} AS totalCredits,${requiredExpr} AS requiredCredits FROM records r WHERE r.name=? AND r.department=? AND r.group_name=? AND r.student_type=? AND r.cohort_id=?`).get(name,department,groupName,studentType,cohortId);if(!student)return json(res,404,{error:"未查到对应记录，请核对培训班、所属小组、姓名、院系和学员类型"});const t=thresholds(cohortId),completed=!student.withdrawn&&student.totalCredits>=t[student.studentType]&&student.requiredCredits>=t.required,courses=db.prepare("SELECT c.name,c.category,COALESCE(a.credit_override,c.credits) AS credits,a.status FROM attendance a JOIN courses c ON c.id=a.course_id WHERE a.student_id=? AND c.active=1 ORDER BY c.sort_order,c.id").all(student.id);return json(res,200,{name:student.name,department:student.department,totalCredits:student.totalCredits,requiredCredits:student.requiredCredits,completed,withdrawn:!!student.withdrawn,thresholds:t,courses})}
+if(req.method==="POST"&&url.pathname==="/api/query"){
+ const d=await body(req,8192);
+ const name=str(d?.name,40),department=str(d?.department,80),groupName=str(d?.groupName,40),studentType=validType(d?.studentType),cohortId=Number(d?.cohortId);
+ if(!name||!department||!groupName||!studentType||!Number.isSafeInteger(cohortId)||cohortId<1) {
+  return json(res,400,{error:"请选择培训班、所属小组，并填写姓名、院系和学员类型"});
+ }
+ const student=db.prepare(`SELECT r.id,r.withdrawn FROM records r JOIN cohorts c ON c.id=r.cohort_id AND c.active=1
+  WHERE r.cohort_id=? AND r.name=? AND r.department=? AND r.student_type=? AND r.group_name=?`)
+  .get(cohortId,name,department,studentType,groupName);
+ if(!student) return json(res,404,{error:"未查到对应记录，请核对培训班、所属小组、姓名、院系和学员类型"});
+ const courses=db.prepare(`SELECT c.name,c.category,COALESCE(a.credit_override,c.credits) AS credits,a.status
+  FROM attendance a JOIN courses c ON c.id=a.course_id WHERE a.student_id=? AND c.cohort_id=? AND c.active=1
+  ORDER BY c.sort_order,c.id`).all(student.id,cohortId);
+ const totalCredits=courses.reduce((sum,course)=>sum+course.credits,0);
+ const requiredCredits=courses.reduce((sum,course)=>sum+(course.category==="required"?course.credits:0),0);
+ const t=thresholds(cohortId), completed=!student.withdrawn&&totalCredits>=t[studentType]&&requiredCredits>=t.required;
+ return json(res,200,{name,department,totalCredits,requiredCredits,completed,withdrawn:!!student.withdrawn,thresholds:t,courses});
+}
 if(req.method==="POST"&&url.pathname==="/api/admin/login"){
  const d=await body(req,8192), username=str(d.username,60), password=d.password;
  if (typeof password!=="string" || password.length>1024) return json(res,401,{error:"账号或密码不正确"});
@@ -404,7 +586,13 @@ if(req.method==="POST"&&url.pathname==="/api/admin/login"){
 }
 if(req.method==="POST"&&url.pathname==="/api/admin/logout"){sessions.delete(token(req));return json(res,200,{ok:true},{"Set-Cookie":`pku_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureCookie}`})}
 if(req.method==="GET"&&url.pathname==="/api/admin/dashboard"){const s=requireAdmin(req,res);if(!s)return;return json(res,200,dashboard(s))}
-if(req.method==="POST"&&url.pathname==="/api/admin/settings"){if(!requireWrite(req,res))return;const d=await body(req);const s=requireWrite(req,res);if(!s)return;const u=Number(d.undergraduate),g=Number(d.graduate),required=Number(d.required);if(![u,g,required].every(v=>Number.isFinite(v)&&v>=0&&v<=10000))return json(res,400,{error:"结业学分无效"});db.prepare("INSERT INTO cohort_settings(cohort_id,threshold_undergraduate,threshold_graduate,threshold_required) VALUES(?,?,?,?) ON CONFLICT(cohort_id) DO UPDATE SET threshold_undergraduate=excluded.threshold_undergraduate,threshold_graduate=excluded.threshold_graduate,threshold_required=excluded.threshold_required").run(s.cohortId,u,g,required);return json(res,200,{ok:true})}
+if(req.method==="POST"&&url.pathname==="/api/admin/settings"){
+ if(!requireWrite(req,res)) return;
+ const d=await body(req,8192), session=requireWrite(req,res);
+ if(!session) return;
+ setThresholds(session.cohortId,d);
+ return json(res,200,{ok:true});
+}
 if(req.method==="POST"&&url.pathname==="/api/admin/cohorts"){
  if(!requireWrite(req,res)) return;
  const d=await body(req);
@@ -412,6 +600,9 @@ if(req.method==="POST"&&url.pathname==="/api/admin/cohorts"){
  if(!session) return;
  const name=str(d.name,100), id=Number(d.id||0);
  if(!name || !Number.isSafeInteger(id) || id<0) return json(res,400,{error:"请填写有效的培训班/团校名称"});
+ if(db.prepare("SELECT 1 FROM cohorts WHERE name=? AND id<>?").get(name,id)) {
+  return json(res,409,{error:"该培训班/团校名称已存在"});
+ }
  if(id){
   if(!canAccessCohort(session.user,id)) return json(res,403,{error:"该培训班/团校不在账号的授权范围内"});
   db.prepare("UPDATE cohorts SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(name,id);
@@ -431,7 +622,13 @@ if(req.method==="POST"&&url.pathname==="/api/admin/students"){
  if(!session) return;
  const s=cleanStudent(d), id=Number(d.id||0), cohortId=session.cohortId;
  if(!Number.isSafeInteger(id)||id<0) return json(res,400,{error:"学员编号无效"});
- if(!id) return json(res,200,{ok:true,id:upsertStudent(s,cohortId)});
+ if(!id) {
+  if(db.prepare("SELECT 1 FROM records WHERE cohort_id=? AND name=? AND department=? AND student_type=?")
+    .get(cohortId,s.name,s.department,s.studentType)) {
+   return json(res,409,{error:"该学员已存在，请从列表打开原记录编辑"});
+  }
+  return json(res,200,{ok:true,id:upsertStudent(s,cohortId)});
+ }
  if(!db.prepare("SELECT 1 FROM records WHERE id=? AND cohort_id=?").get(id,cohortId)) {
   return json(res,404,{error:"学员不存在或不在当前培训班/团校"});
  }
@@ -444,11 +641,35 @@ if(req.method==="POST"&&url.pathname==="/api/admin/students"){
  return json(res,200,{ok:true,id});
 }
 const studentMatch=url.pathname.match(/^\/api\/admin\/students\/(\d+)$/);
-if(req.method==="GET"&&studentMatch){const session=requireAdmin(req,res);if(!session)return;const cohortId=session.cohortId,id=Number(studentMatch[1]),group=session.user.role==="liaison"?session.user.group_name:"",student=studentRows(cohortId,group).find(r=>r.id===id);if(!student)return json(res,404,{error:"学员不存在或不在账号管理范围内"});const attendance=db.prepare("SELECT c.id AS courseId,c.name,c.category,c.credits,a.status,a.source_mark AS sourceMark,a.credit_override AS creditOverride FROM courses c LEFT JOIN attendance a ON a.course_id=c.id AND a.student_id=? WHERE c.active=1 AND c.cohort_id=? ORDER BY c.sort_order,c.id").all(id,cohortId);return json(res,200,{student,attendance,attendancePolicy:effectiveAttendancePolicy(session.user)})}
+if(req.method==="GET"&&studentMatch){const session=requireAdmin(req,res);if(!session)return;const cohortId=session.cohortId,id=Number(studentMatch[1]),group=session.user.role==="liaison"?session.user.group_name:"",student=studentRows(cohortId,group,id)[0];if(!student)return json(res,404,{error:"学员不存在或不在账号管理范围内"});const attendance=db.prepare("SELECT c.id AS courseId,c.name,c.category,c.credits,a.status,a.source_mark AS sourceMark,a.credit_override AS creditOverride FROM courses c LEFT JOIN attendance a ON a.course_id=c.id AND a.student_id=? WHERE c.active=1 AND c.cohort_id=? ORDER BY c.sort_order,c.id").all(id,cohortId);return json(res,200,{student,attendance,attendancePolicy:effectiveAttendancePolicy(session.user)})}
 if(req.method==="DELETE"&&studentMatch){const session=requireWrite(req,res);if(!session)return;const id=Number(studentMatch[1]),student=db.prepare("SELECT id FROM records WHERE id=? AND cohort_id=?").get(id,session.cohortId);if(!student)return json(res,404,{error:"学员不存在"});db.prepare("DELETE FROM records WHERE id=?").run(id);return json(res,200,{ok:true})}
-if(req.method==="POST"&&url.pathname==="/api/admin/courses"){if(!requireWrite(req,res))return;const d=await body(req);const session=requireWrite(req,res);if(!session)return;const cohortId=session.cohortId,c=cleanCourse(d);if(c.id)db.prepare("UPDATE courses SET name=?,category=?,credits=?,sort_order=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND cohort_id=?").run(c.name,c.category,c.credits,c.sortOrder,c.active,c.id,cohortId);else{c.key=`${cohortId}:${c.key}`;db.prepare("INSERT INTO courses(course_key,name,category,credits,sort_order,active,source_header,cohort_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(course_key) DO UPDATE SET name=excluded.name,category=excluded.category,credits=excluded.credits,sort_order=excluded.sort_order,active=excluded.active,source_header=excluded.source_header,updated_at=CURRENT_TIMESTAMP").run(c.key,c.name,c.category,c.credits,c.sortOrder,c.active,c.sourceHeader,cohortId)}return json(res,200,{ok:true})}
+if(req.method==="POST"&&url.pathname==="/api/admin/courses"){
+ if(!requireWrite(req,res)) return;
+ const d=await body(req,8192), session=requireWrite(req,res);
+ if(!session) return;
+ const c=cleanCourse(d), cohortId=session.cohortId;
+ if(c.id!==null) {
+  const updated=db.prepare(`UPDATE courses SET name=?,category=?,credits=?,sort_order=?,active=?,
+   updated_at=CURRENT_TIMESTAMP WHERE id=? AND cohort_id=?`).run(c.name,c.category,c.credits,c.sortOrder,c.active,c.id,cohortId);
+  if(!updated.changes) return json(res,404,{error:"课程不存在或不在当前培训班/团校"});
+ } else {
+  db.prepare(`INSERT INTO courses(course_key,name,category,credits,sort_order,active,source_header,cohort_id)
+   VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(course_key) DO UPDATE SET name=excluded.name,
+   category=excluded.category,credits=excluded.credits,sort_order=excluded.sort_order,active=excluded.active,
+   source_header=excluded.source_header,updated_at=CURRENT_TIMESTAMP`)
+   .run(cohortId+":"+c.key,c.name,c.category,c.credits,c.sortOrder,c.active,c.sourceHeader,cohortId);
+ }
+ return json(res,200,{ok:true});
+}
 const courseMatch=url.pathname.match(/^\/api\/admin\/courses\/(\d+)$/);
-if(req.method==="DELETE"&&courseMatch){const session=requireWrite(req,res);if(!session)return;db.prepare("UPDATE courses SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=? AND cohort_id=?").run(Number(courseMatch[1]),session.cohortId);return json(res,200,{ok:true})}
+if(req.method==="DELETE"&&courseMatch){
+ const session=requireWrite(req,res);
+ if(!session) return;
+ const updated=db.prepare("UPDATE courses SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=? AND cohort_id=?")
+  .run(Number(courseMatch[1]),session.cohortId);
+ if(!updated.changes) return json(res,404,{error:"课程不存在或不在当前培训班/团校"});
+ return json(res,200,{ok:true});
+}
 const checkInMatch=url.pathname.match(/^\/api\/admin\/courses\/(\d+)\/check-in$/);
 if (req.method==="POST" && checkInMatch) {
  if (!requireWrite(req,res)) return;
@@ -546,7 +767,12 @@ if(req.method==="POST" && (courseAttendanceMatch || personalAttendance)) {
  if(result) return json(res,result.status,{error:result.error});
  return json(res,200,{ok:true});
 }
-if(req.method==="POST"&&url.pathname==="/api/admin/import-full"){if(!requireWrite(req,res))return;const d=await body(req);const session=requireWrite(req,res);if(!session)return;const cohortId=session.cohortId;if(!Array.isArray(d.students)||!Array.isArray(d.courses)||!Array.isArray(d.attendance))return json(res,400,{error:"导入数据结构不正确"});if(d.students.length>3000||d.attendance.length>100000)return json(res,400,{error:"导入数据量过大"});db.exec("BEGIN");try{const courseIds=new Map();for(const raw of d.courses){const c=cleanCourse(raw),sourceKey=c.key;c.key=`${cohortId}:${sourceKey}`;db.prepare("INSERT INTO courses(course_key,name,category,credits,sort_order,active,source_header,cohort_id) VALUES(?,?,?,?,?,1,?,?) ON CONFLICT(course_key) DO UPDATE SET name=excluded.name,category=excluded.category,credits=excluded.credits,sort_order=excluded.sort_order,active=1,source_header=excluded.source_header,cohort_id=excluded.cohort_id,updated_at=CURRENT_TIMESTAMP").run(c.key,c.name,c.category,c.credits,c.sortOrder,c.sourceHeader,cohortId);courseIds.set(sourceKey,db.prepare("SELECT id FROM courses WHERE course_key=?").get(c.key).id)}const studentIds=new Map();for(const raw of d.students){const s=cleanStudent(raw),id=upsertStudent(s,cohortId);studentIds.set(raw.importKey,id);db.prepare("DELETE FROM attendance WHERE student_id=?").run(id)}const ins=db.prepare("INSERT INTO attendance(student_id,course_id,status,source_mark,credit_override) VALUES(?,?,?,?,?) ON CONFLICT(student_id,course_id) DO UPDATE SET status=excluded.status,source_mark=excluded.source_mark,credit_override=excluded.credit_override,updated_at=CURRENT_TIMESTAMP");for(const a of d.attendance){const sid=studentIds.get(a.studentKey),cid=courseIds.get(a.courseKey);if(sid&&cid&&["attended","makeup","special"].includes(a.status))ins.run(sid,cid,a.status,str(a.sourceMark,30),a.status==="special"?8:null)}db.exec("COMMIT")}catch(e){db.exec("ROLLBACK");throw e}return json(res,200,{ok:true,students:d.students.length,courses:d.courses.length,attendance:d.attendance.length})}
+if(req.method==="POST"&&url.pathname==="/api/admin/import-full"){
+ if(!requireWrite(req,res)) return;
+ const payload=await body(req), session=requireWrite(req,res);
+ if(!session) return;
+ return json(res,200,importTrainingData(session.cohortId,payload));
+}
 if(req.method==="GET"&&url.pathname==="/api/admin/template.xlsx"){const s=requireWrite(req,res);if(!s)return;return binary(res,workbookBuffer(s.cohortId,true),"完整导入模板.xlsx")}
 if(req.method==="GET"&&url.pathname==="/api/admin/export.xlsx"){const s=requireWrite(req,res);if(!s)return;return binary(res,workbookBuffer(s.cohortId,false),`${db.prepare("SELECT name FROM cohorts WHERE id=?").get(s.cohortId).name}-完整数据.xlsx`)}
 if(req.method==="GET"&&url.pathname==="/api/admin/accounts"){
@@ -621,8 +847,8 @@ if(req.method==="POST"&&url.pathname==="/api/admin/accounts"){
 const accountMatch=url.pathname.match(/^\/api\/admin\/accounts\/(\d+)$/);
 if(req.method==="DELETE"&&accountMatch){const session=requireSuper(req,res);if(!session)return;const id=Number(accountMatch[1]),target=db.prepare("SELECT username,role FROM admin_accounts WHERE id=?").get(id);if(!target)return json(res,404,{error:"账号不存在"});if(target.username===session.user.username||target.role==="super")return json(res,403,{error:"当前账号及两个最高权限账号不能删除"});db.prepare("DELETE FROM admin_accounts WHERE id=?").run(id);return json(res,200,{ok:true})}
 return json(res,404,{error:"接口不存在"})}catch(error){
+ if(error instanceof InputError) return json(res,error.status,{error:error.message});
  if(error instanceof SyntaxError) return json(res,400,{error:"请求数据格式不正确"});
- if(error.message==="请求内容过大") return json(res,413,{error:error.message});
  console.error(error);
  return json(res,500,{error:"服务器处理失败，请稍后重试"});
 }}
