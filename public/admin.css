@@ -250,6 +250,12 @@ input:not([type="checkbox"],[type="radio"],[type="file"]), select {
   font-weight: 650;
 }
 .completion-section h3, .completion-figure h4 { margin: 0 0 12px; }
+.roster-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.roster-filters button { font: inherit; font-size: .85rem; }
+.roster-filters button span { margin-left: 4px; font-variant-numeric: tabular-nums; }
+.roster-filters button[aria-pressed="true"] { color: var(--red); border-color: var(--red); background: #f8ecee; }
+#roster-filter-result { margin: 8px 0 0; font-size: .85rem; }
+.roster-empty { padding: 12px 16px; }
 .completion-filters { display: grid; grid-template-columns: minmax(0, 22rem) minmax(0, 13rem); gap: 12px; }
 .department-chart-caption, .completion-method { font-size: .9rem; }
 .department-completion-bars {

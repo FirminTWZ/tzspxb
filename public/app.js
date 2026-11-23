@@ -336,7 +336,7 @@ for (const id of ["admin-entry-form","switch-cohort-form"]) {
 function card(label,s,status="结业"){return`<div class="stat-card"><span class="label">${label}</span><div class="metric"><strong>${s.rate}%</strong><small>${s.passed}/${s.count} 人${status}<br>平均 ${s.average} 学分</small></div></div>`}
 function render(){const s=data.stats;$("#stat-grid").innerHTML=card("总体结业率（满足必修）",s.total)+card("本科生结业率（满足必修）",s.undergraduate)+card("硕博生结业率（满足必修）",s.graduate);$("#settings-form").elements.undergraduate.value=data.thresholds.undergraduate;$("#settings-form").elements.graduate.value=data.thresholds.graduate;$("#settings-form").elements.required.value=data.thresholds.required;$("#accounts-tab-btn").classList.toggle("hidden",!data.user.canManageAccounts);$$('#tab-courses,#tab-settings,#tab-cohorts').forEach(x=>x.classList.toggle('role-hidden',!data.user.canEdit));$$('.tab-btn[data-tab="courses"],.tab-btn[data-tab="settings"],.tab-btn[data-tab="cohorts"]').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$$('#new-student-btn,#template-download,#export-download,.file-btn').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$("#type-chart").innerHTML=`<div class="chart-row"><div class="chart-label"><span>本科生</span><strong>${s.undergraduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.undergraduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><div class="chart-row"><div class="chart-label"><span>硕博生</span><strong>${s.graduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.graduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><p class="muted">另有 ${s.withdrawn} 人已退出／休学，未计入以上人数。</p>`;}
 function renderStudents(){const q=$("#student-search").value.trim().toLowerCase(),show=$("#show-withdrawn").checked;const rows=data.records.filter(r=>(show||!r.withdrawn)&&(!q||[r.name,r.department,r.groupName,r.groupContact].some(x=>String(x).toLowerCase().includes(q))));$("#student-count").textContent=`显示 ${rows.length} / ${data.records.length} 人`;$("#students-body").innerHTML=rows.length?rows.map(r=>`<tr class="${r.withdrawn?'withdrawn-row':''}"><td><strong>${esc(r.name)}</strong></td><td>${esc(r.department)}</td><td>${esc(r.groupName||'—')}</td><td>${typeName(r.studentType)}</td><td><strong>${r.totalCredits}</strong></td><td>${r.requiredCredits}</td><td>${r.courseCount}</td><td><span class="status ${r.withdrawn?'pending':'pass'}">${r.withdrawn?'已退出／休学':'在班'}</span></td><td><span class="status ${r.completed?'pass':'pending'}">${r.completed?'已结业':'未结业'}</span></td><td class="row-actions"><button class="small-btn primary-link" data-attendance="${r.id}">课程记录</button>${data.user.canEdit?`<button class="small-btn" data-edit-student="${r.id}">编辑</button><button class="delete-btn" data-delete-student="${r.id}">删除</button>`:''}</td></tr>`).join(""):'<tr><td colspan="10" class="empty-cell">暂无匹配学员</td></tr>'}
-function renderCourses(){$("#courses-body").innerHTML=(data.courses.filter(c=>c.active).map(c=>`<tr><td>${c.sortOrder}</td><td><strong>${esc(c.name)}</strong></td><td><span class="course-type ${c.category}">${categoryName(c.category)}</span></td><td>${c.credits}</td><td class="row-actions"><button class="small-btn primary-link" data-course-roster="${c.id}">登记出勤</button><button class="small-btn" data-edit-course="${c.id}">编辑</button><button class="delete-btn" data-delete-course="${c.id}">停用</button></td></tr>`).join("")||'<tr><td colspan="5" class="empty-cell">暂无课程</td></tr>')}
+function renderCourses(){$("#courses-body").innerHTML=(data.courses.filter(c=>c.active).map(c=>`<tr><td>${c.sortOrder}</td><td><strong>${esc(c.name)}</strong></td><td><span class="course-type ${c.category}">${categoryName(c.category)}</span></td><td>${c.credits}</td><td class="row-actions"><button class="small-btn primary-link" data-course-roster="${c.id}">出勤名单</button><button class="small-btn" data-edit-course="${c.id}">编辑</button><button class="delete-btn" data-delete-course="${c.id}">停用</button></td></tr>`).join("")||'<tr><td colspan="5" class="empty-cell">暂无课程</td></tr>')}
 let activeAdminTab="students";
 function selectAdminTab(name,{render=true}={}) {
   const chosen=$('.tab-btn[data-tab="'+name+'"]');
@@ -1382,6 +1382,50 @@ renderCourses=function(){
 };
 $("#courses-body").onclick=async e=>{const edit=e.target.dataset.editCourse,remove=e.target.dataset.deleteCourse,roster=e.target.dataset.courseRoster;if(edit)openCourse(data.courses.find(c=>c.id===Number(edit)));if(roster)openCourseRoster(Number(roster));if(remove&&confirm("停用后，该课程不再计入任何学员总学分。确定继续吗？")){await request(`/api/admin/courses/${remove}`,{method:"DELETE"});await loadDashboard();toast("课程已停用")}};
 
+function bindRosterFilters(dialog, list) {
+  const rows=[...list.querySelectorAll(".attendance-row")];
+  const search=dialog.querySelector("#roster-search"), filters=dialog.querySelector(".roster-filters");
+  const result=dialog.querySelector("#roster-filter-result"), empty=list.querySelector(".roster-empty");
+  const counts=new Map();
+  for (const row of rows) {
+    const status=row.dataset.rosterStatus;
+    counts.set(status,(counts.get(status)??0)+1);
+  }
+  counts.set("all",rows.length-(counts.get("withdrawn")??0));
+  const choices=[["all","在班学员"],...attendanceStatuses.map(status=>[status,statusName(status)])];
+  if (counts.has("special")) choices.push(["special",statusName("special")]);
+  if (counts.has("withdrawn")) choices.push(["withdrawn","已退出／休学"]);
+  filters.innerHTML=choices.map(([key,label])=>`<button type="button" class="small-btn"
+    data-roster-filter="${key}" aria-pressed="${key==="all"}">${label} <span>${counts.get(key)??0} 人</span></button>`).join("");
+
+  let selected="all";
+  const applyFilter=()=>{
+    const query=search.value.trim().toLowerCase();
+    let visibleCount=0;
+    for (const row of rows) {
+      const status=row.dataset.rosterStatus;
+      const matches=selected==="all"?status!=="withdrawn":status===selected;
+      const visible=matches && row.dataset.search.includes(query);
+      row.classList.toggle("hidden",!visible);
+      if (visible) visibleCount++;
+      else row.querySelector(".roster-check").checked=false;
+    }
+    result.textContent=`当前显示 ${visibleCount} 人`;
+    empty.hidden=visibleCount>0;
+    list.scrollTop=0;
+  };
+  filters.onclick=event=>{
+    const button=event.target.closest("[data-roster-filter]");
+    if (!button) return;
+    filters.querySelector('[aria-pressed="true"]').setAttribute("aria-pressed","false");
+    button.setAttribute("aria-pressed","true");
+    selected=button.dataset.rosterFilter;
+    applyFilter();
+  };
+  search.oninput=applyFilter;
+  applyFilter();
+}
+
 async function openCourseRoster(id) {
   const scope=data.scope;
   try {
@@ -1404,9 +1448,11 @@ async function openCourseRoster(id) {
     ));
     const editable=batchChoices.length>0;
     dialog.innerHTML=`<form method="dialog" id="course-roster-form">
-      <div class="dialog-head"><div><h2>${esc(course.name)} · ${editable?"出勤登记":"查看出勤"}</h2>
+      <div class="dialog-head"><div><h2>${esc(course.name)} · 出勤名单</h2>
       <p>${esc(policyDescription(policy))}</p></div><button class="icon-btn" type="button" id="roster-close" aria-label="关闭">×</button></div>
+      <div class="roster-filters" role="group" aria-label="按已保存的出勤状态筛选"></div>
       <input id="roster-search" placeholder="搜索姓名、院系或小组" aria-label="搜索姓名、院系或小组">
+      <p id="roster-filter-result" class="muted" role="status"></p>
       ${editable?`<div class="bulk-tools">
         <button type="button" class="ghost" id="select-all-roster">一键全选</button>
         <button type="button" class="ghost" id="clear-roster-selection">取消选择</button>
@@ -1418,27 +1464,21 @@ async function openCourseRoster(id) {
         const choices=availableAttendanceStatuses(policy,course.category,status,student.withdrawn);
         return `<div class="attendance-row ${student.withdrawn?"withdrawn-row":""}" data-student-id="${student.id}"
             data-student="${student.id}" data-original-status="${status}" data-credits="${course.credits}"
+            data-roster-status="${student.withdrawn?"withdrawn":status}"
             data-credit-override="${student.creditOverride??""}" data-search="${esc((student.name+" "+student.department+" "+student.groupName).toLowerCase())}">
           <input class="roster-check" type="checkbox" ${choices.length===1?"disabled":""} aria-label="选择${esc(student.name)}">
           <div><strong>${esc(student.name)}</strong><small>${esc(student.department)} · ${esc(student.groupName||"未分组")}${student.withdrawn?" · 已退出／休学":""}</small></div>
           ${attendanceSelect(choices,status,student.name+"的出勤状态")}
           <strong>${earnedCredits(status,course.credits,student.creditOverride)} 分</strong>
         </div>`;
-      }).join("") || '<p class="muted">当前范围内暂无学员。</p>'}</div>
+      }).join("")}<p class="roster-empty muted" hidden>当前筛选下暂无学员。</p></div>
       <div class="dialog-actions"><button class="ghost" type="button" id="roster-cancel">${editable?"取消":"关闭"}</button>
       ${editable?'<button class="primary" type="submit">保存出勤记录</button>':""}</div></form>`;
     dialog.showModal();
     if (manager) bindCheckIn(id,roster,dialog);
     $("#roster-close").onclick=$("#roster-cancel").onclick=()=>dialog.close();
     const list=$("#course-roster-list");
-    $("#roster-search").oninput=event=>{
-      const query=event.target.value.trim().toLowerCase();
-      for (const row of list.querySelectorAll(".attendance-row")) {
-        const visible=row.dataset.search.includes(query);
-        row.classList.toggle("hidden",!visible);
-        if (!visible) row.querySelector(".roster-check").checked=false;
-      }
-    };
+    bindRosterFilters(dialog,list);
     if (!editable) return;
     $("#select-all-roster").onclick=()=>{
       list.querySelectorAll(".attendance-row:not(.hidden) .roster-check:not(:disabled)").forEach(input=>input.checked=true);
@@ -1492,8 +1532,8 @@ function renderGuide() {
     sections.push(`
       <div class="guide-step">
         <h3>学员、课程与出勤</h3>
-        <p>在“学员与学分”新增、编辑或删除学员，也可以下载完整 Excel 的导入范例、导入或导出。名单只用于一门课签到时，从该课的“登记出勤”进入“名单签到”，核对预览后再确认。</p>
-        <p>在“课程管理”新增课程、调整类别或学分，也可以在出勤名单中勾选学员，批量登记现场出勤、完成补修或未参加。核对后点击“保存出勤记录”。</p>
+        <p>在“学员与学分”新增、编辑或删除学员，也可以下载完整 Excel 的导入范例、导入或导出。名单只用于一门课签到时，从该课的“出勤名单”进入“名单签到”，核对预览后再确认。</p>
+        <p>在“课程管理”打开课程的“出勤名单”，按已保存的出勤状态筛选，也可按姓名、院系或小组搜索。批量登记时先勾选学员，核对修改后点击“保存出勤记录”。</p>
       </div>
       <div class="guide-step">
         <h3>培训班/团校与结业</h3>
