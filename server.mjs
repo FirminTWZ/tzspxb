@@ -2,7 +2,8 @@ import http from "node:http";
 import { readFileSync, statSync, mkdirSync } from "node:fs";
 import { join, dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes, timingSafeEqual, scryptSync } from "node:crypto";
+import { randomBytes, timingSafeEqual, scrypt, scryptSync } from "node:crypto";
+import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 import XLSX from "xlsx";
 import { attendanceOptions, legacyAttendancePolicy, normalizeAttendancePolicy } from "./public/attendance-policy.js";
@@ -47,7 +48,8 @@ CREATE TABLE IF NOT EXISTS registration_cohort_requests (
  cohort_id INTEGER NOT NULL REFERENCES cohorts(id) ON DELETE CASCADE,
  PRIMARY KEY(registration_id,cohort_id)
 )`);
-function passwordMatches(password,stored){const [salt,hex]=String(stored).split(":");if(!salt||!hex)return false;const actual=scryptSync(String(password),salt,64),expected=Buffer.from(hex,"hex");return actual.length===expected.length&&timingSafeEqual(actual,expected)}
+const deriveKey=promisify(scrypt);
+async function passwordMatches(password,stored){const [salt,hex]=String(stored).split(":");if(!salt||!hex)return false;const actual=await deriveKey(password,salt,64),expected=Buffer.from(hex,"hex");return actual.length===expected.length&&timingSafeEqual(actual,expected)}
 function seedSuper(username,password){const row=db.prepare("SELECT id FROM admin_accounts WHERE username=?").get(username);if(row)db.prepare("UPDATE admin_accounts SET role='super',active=1,cohort_id=NULL,group_name='' WHERE id=?").run(row.id);else db.prepare("INSERT INTO admin_accounts(username,password_hash,role) VALUES(?,?,'super')").run(username,passwordHash(password))}
 if(process.env.SUPER_ADMIN_1_PASSWORD)seedSuper(process.env.SUPER_ADMIN_1_USERNAME||"pkuzzb",process.env.SUPER_ADMIN_1_PASSWORD);
 if(process.env.SUPER_ADMIN_2_PASSWORD)seedSuper(process.env.SUPER_ADMIN_2_USERNAME||"zhangtongwei",process.env.SUPER_ADMIN_2_PASSWORD);
@@ -55,6 +57,10 @@ if(!db.prepare("SELECT COUNT(*) AS n FROM admin_accounts WHERE active=1").get().
 const legacy=Object.fromEntries(db.prepare("SELECT key,value FROM settings").all().map(r=>[r.key,Number(r.value)]));for(const c of db.prepare("SELECT id FROM cohorts").all())db.prepare("INSERT OR IGNORE INTO cohort_settings(cohort_id,threshold_undergraduate,threshold_graduate,threshold_required) VALUES(?,?,?,0)").run(c.id,legacy.threshold_undergraduate??10,legacy.threshold_graduate??10);
 
 const sessions=new Map(),SESSION_MS=12*60*60*1000,secureCookie=process.env.COOKIE_SECURE==="true"?"; Secure":"";
+const activeCohorts=db.prepare("SELECT id,name FROM cohorts WHERE active=1 ORDER BY id DESC");
+const activeCohort=db.prepare("SELECT id,name FROM cohorts WHERE id=? AND active=1");
+const activeAccount=db.prepare("SELECT * FROM admin_accounts WHERE id=? AND active=1");
+const hasCohortGrant=db.prepare("SELECT 1 FROM admin_cohort_grants WHERE account_id=? AND cohort_id=?");
 function orgCohorts(accountId) {
  return db.prepare(`SELECT c.id,c.name FROM admin_cohort_grants g
   JOIN cohorts c ON c.id=g.cohort_id WHERE g.account_id=? AND c.active=1 ORDER BY c.id DESC`).all(accountId);
@@ -64,10 +70,16 @@ function requestedCohorts(registrationId) {
   JOIN cohorts c ON c.id=g.cohort_id WHERE g.registration_id=? ORDER BY c.id DESC`).all(registrationId);
 }
 function canAccessCohort(account,cohortId) {
- if (!Number.isSafeInteger(cohortId) || !db.prepare("SELECT 1 FROM cohorts WHERE id=? AND active=1").get(cohortId)) return false;
+ if (!Number.isSafeInteger(cohortId) || !activeCohort.get(cohortId)) return false;
  if (account.role==="super") return true;
  if (account.role==="liaison") return account.cohort_id===cohortId && !!account.group_name;
- return account.role==="org" && !!db.prepare("SELECT 1 FROM admin_cohort_grants WHERE account_id=? AND cohort_id=?").get(account.id,cohortId);
+ return account.role==="org" && !!hasCohortGrant.get(account.id,cohortId);
+}
+function accessibleCohorts(account) {
+ if (account.role==="super") return activeCohorts.all();
+ if (account.role==="org") return orgCohorts(account.id);
+ const cohort=account.group_name && account.cohort_id!=null ? activeCohort.get(account.cohort_id) : null;
+ return cohort ? [cohort] : [];
 }
 function validCohortIds(value,{allowEmpty=false}={}) {
  if (!Array.isArray(value) || (!allowEmpty && !value.length) || value.length>1000 ||
@@ -139,32 +151,43 @@ async function body(req,limit=14_000_000) {
  return value;
 }
 function token(req){return(req.headers.cookie||"").split(";").map(v=>v.trim()).find(v=>v.startsWith("pku_admin="))?.slice(10)||""}
+function setAdminCohort(session,cohortId) {
+ session.cohortId=cohortId;
+ // A fresh scope also distinguishes stale screens after switching A → B → A.
+ session.scope=randomBytes(12).toString("base64url");
+}
 function adminSession(req) {
  const key=token(req), session=sessions.get(key);
  if (!session) return null;
- const current=db.prepare("SELECT * FROM admin_accounts WHERE id=? AND active=1").get(session.user.id);
+ const current=activeAccount.get(session.user.id);
  if (session.expires<Date.now() || !current || current.password_hash!==session.user.password_hash ||
-     current.role!==session.user.role || current.cohort_id!==session.user.cohort_id || current.group_name!==session.user.group_name ||
-     !canAccessCohort(current,session.cohortId)) {
+     current.role!==session.user.role || current.cohort_id!==session.user.cohort_id || current.group_name!==session.user.group_name) {
   sessions.delete(key);
   return null;
  }
+ if (session.cohortId!==null && !canAccessCohort(current,session.cohortId)) setAdminCohort(session,null);
  return {...session,user:current};
 }
-function requireAdmin(req,res) {
+function requireIdentity(req,res) {
  const session=adminSession(req);
- if(!session) {
-  json(res,401,{error:"请先登录管理员后台"});
-  return null;
- }
- const scope=req.headers["x-pku-admin-scope"];
- if(scope && scope!==session.user.id+":"+session.cohortId) {
-  json(res,409,{error:"另一标签页已切换账号或培训班/团校，请刷新后核对再操作"});
+ if(!session) json(res,401,{error:"请先登录管理员后台"});
+ return session;
+}
+function adminScopeMatches(res,session,scope) {
+ if(!scope || scope===session.scope) return true;
+ json(res,409,{code:"ADMIN_SCOPE_CHANGED",error:"管理范围已改变，请核对当前培训班/团校后重试"});
+ return false;
+}
+function requireAdmin(req,res,scope=req.headers["x-pku-admin-scope"]) {
+ const session=requireIdentity(req,res);
+ if (!session || !adminScopeMatches(res,session,scope)) return null;
+ if (session.cohortId===null) {
+  json(res,428,{error:"请先选择要管理的培训班/团校"});
   return null;
  }
  return session;
 }
-function requireWrite(req,res){const s=requireAdmin(req,res);if(!s)return null;if(s.user.role==="liaison"){json(res,403,{error:"此操作仅限培训班/团校管理员"});return null}return s}
+function requireWrite(req,res,scope){const s=requireAdmin(req,res,scope);if(!s)return null;if(s.user.role==="liaison"){json(res,403,{error:"此操作仅限培训班/团校管理员"});return null}return s}
 function requireSuper(req,res){const s=requireAdmin(req,res);if(!s)return null;if(s.user.role!=="super"){json(res,403,{error:"只有校团委组织部账号可以管理账号与权限"});return null}return s}
 function safeEqual(a,b){const aa=Buffer.from(String(a)),bb=Buffer.from(String(b));return aa.length===bb.length&&timingSafeEqual(aa,bb)}
 function thresholds(cohortId){return db.prepare("SELECT threshold_undergraduate AS undergraduate,threshold_graduate AS graduate,threshold_required AS required FROM cohort_settings WHERE cohort_id=?").get(cohortId)||{undergraduate:10,graduate:10,required:0}}
@@ -176,7 +199,7 @@ function effectiveAttendancePolicy(account) {
  if (account.role!=="liaison") return {mode:"manager"};
  return account.attendance_policy?JSON.parse(account.attendance_policy):cohortAttendancePolicy(account.cohort_id);
 }
-function publicUser(u){return{id:u.id,username:u.username,role:u.role,roleName:u.role==="super"?"校团委组织部":u.role==="org"?"校团委组织部骨干":"小组联络员",cohortId:u.cohort_id,cohortIds:u.role==="org"?orgCohorts(u.id).map(cohort=>cohort.id):[],groupName:u.group_name,canManageAccounts:u.role==="super",canEdit:u.role!=="liaison",attendancePolicy:effectiveAttendancePolicy(u)}}
+function publicUser(u,cohorts){return{id:u.id,username:u.username,role:u.role,roleName:u.role==="super"?"校团委组织部":u.role==="org"?"校团委组织部骨干":"小组联络员",cohortId:u.cohort_id,cohortIds:u.role==="org"?cohorts.map(cohort=>cohort.id):[],groupName:u.group_name,canManageAccounts:u.role==="super",canEdit:u.role!=="liaison",attendancePolicy:effectiveAttendancePolicy(u)}}
 function validGroup(cohortId, groupName) {
  return Number.isSafeInteger(cohortId) && !!groupName && !!db.prepare(
   "SELECT 1 FROM records r JOIN cohorts c ON c.id=r.cohort_id WHERE c.active=1 AND c.id=? AND r.group_name=? LIMIT 1"
@@ -199,7 +222,7 @@ const studentFields=`r.id,r.name,r.department,r.student_type AS studentType,r.gr
  r.group_contact AS groupContact,r.political_status AS politicalStatus,r.league_branch AS leagueBranch,
  r.phone,r.email,r.withdrawn,r.withdrawal_note AS withdrawalNote,r.source_total AS sourceTotal,
  r.note,r.updated_at AS updatedAt`;
-function studentRows(cohortId,groupName="",studentId=null) {
+function studentRows(cohortId,groupName="",studentId=null,includeAttendance=false) {
  const filters=["r.cohort_id=?"], args=[cohortId];
  if (groupName) { filters.push("r.group_name=?"); args.push(groupName); }
  if (studentId!==null) { filters.push("r.id=?"); args.push(studentId); }
@@ -207,6 +230,7 @@ function studentRows(cohortId,groupName="",studentId=null) {
   COALESCE(SUM(CASE WHEN c.id IS NOT NULL THEN COALESCE(a.credit_override,c.credits) END),0) AS totalCredits,
   COALESCE(SUM(CASE WHEN c.category='required' THEN COALESCE(a.credit_override,c.credits) END),0) AS requiredCredits,
   COUNT(c.id) AS courseCount
+  ${includeAttendance?", GROUP_CONCAT(c.id) AS attendedCourseIds":""}
  FROM records r LEFT JOIN attendance a ON a.student_id=r.id
  LEFT JOIN courses c ON c.id=a.course_id AND c.cohort_id=r.cohort_id AND c.active=1
  WHERE ${filters.join(" AND ")}
@@ -246,21 +270,6 @@ function completionProgress(student, courses, attended, limits) {
   canGraduateWithRequiredOnly:!student.completed && required.length>1 &&
    student.totalCredits+requiredGain>=totalLimit && student.requiredCredits+requiredGain>=requiredLimit
  };
-}
-
-function activeAttendance(cohortId, group) {
- const rows=db.prepare(`
-  SELECT a.student_id AS studentId,a.course_id AS courseId
-  FROM attendance a JOIN records r ON r.id=a.student_id JOIN courses c ON c.id=a.course_id
-  WHERE r.cohort_id=? AND c.cohort_id=? AND c.active=1 AND r.withdrawn=0
-  ${group?"AND r.group_name=?":""}
- `).all(cohortId,cohortId,...(group?[group]:[]));
- const byStudent=new Map();
- for (const {studentId,courseId} of rows) {
-  if (!byStudent.has(studentId)) byStudent.set(studentId,new Set());
-  byStudent.get(studentId).add(courseId);
- }
- return byStudent;
 }
 
 function cleanCheckInEntries(entries) {
@@ -317,20 +326,31 @@ function checkInPlan(cohortId, courseId, entries) {
  return {ready,skipped};
 }
 
+function adminContext(session) {
+ const cohorts=accessibleCohorts(session.user);
+ return {
+  scope:session.scope,
+  user:publicUser(session.user,cohorts),
+  cohorts,
+  cohort:cohorts.find(cohort=>cohort.id===session.cohortId)??null
+ };
+}
 function dashboard(session) {
  const cohortId=session.cohortId, t=thresholds(cohortId);
  const group=session.user.role==="liaison"?session.user.group_name:"";
  const courses=courseRows(cohortId);
  const available=courses.filter(course=>course.active).sort((a,b)=>b.credits-a.credits);
- const attendance=activeAttendance(cohortId,group), empty=new Set();
- const all=studentRows(cohortId,group).map(row=>{
+ const empty=new Set();
+ const all=studentRows(cohortId,group,null,true).map(({attendedCourseIds,...row})=>{
   const completed=!row.withdrawn && row.totalCredits>=t[row.studentType] && row.requiredCredits>=t.required;
   const record={...row,completed};
-  if (!row.withdrawn) record.progress=completionProgress(record,available,attendance.get(row.id)??empty,t);
+  if (!row.withdrawn) {
+   const attended=attendedCourseIds?new Set(attendedCourseIds.split(",").map(Number)):empty;
+   record.progress=completionProgress(record,available,attended,t);
+  }
   return record;
  });
  const active=all.filter(row=>!row.withdrawn);
- const cohort=db.prepare("SELECT id,name FROM cohorts WHERE id=?").get(cohortId);
  const summarize=rows=>{
   const count=rows.length, passed=rows.filter(row=>row.completed).length;
   return {
@@ -340,7 +360,7 @@ function dashboard(session) {
   };
  };
  return {
-  cohort,user:publicUser(session.user),records:all,courses,thresholds:t,features:{workbookRoundTrip:true},
+  ...adminContext(session),records:all,courses,thresholds:t,features:{workbookRoundTrip:true},
   stats:{
    total:summarize(active),
    undergraduate:summarize(active.filter(row=>row.studentType==="undergraduate")),
@@ -562,29 +582,48 @@ if(req.method==="POST"&&url.pathname==="/api/query"){
  return json(res,200,{name,department,totalCredits,requiredCredits,completed,withdrawn:!!student.withdrawn,thresholds:t,courses});
 }
 if(req.method==="POST"&&url.pathname==="/api/admin/login"){
- const d=await body(req,8192), username=str(d.username,60), password=d.password;
+ const d=await body(req,8192), username=str(d?.username,60), password=d?.password;
  if (typeof password!=="string" || password.length>1024) return json(res,401,{error:"账号或密码不正确"});
  const account=db.prepare("SELECT * FROM admin_accounts WHERE username=? AND active=1").get(username);
  if (!account) {
   const application=db.prepare("SELECT password_hash FROM admin_registration_requests WHERE username=?").get(username);
-  if (application && passwordMatches(password,application.password_hash)) {
+  if (application && await passwordMatches(password,application.password_hash)) {
    return json(res,403,{error:"注册申请正在等待审批，审批通过后即可登录"});
   }
  }
- if (!account || !passwordMatches(password,account.password_hash)) return json(res,401,{error:"账号或密码不正确"});
- const cohortId=account.role==="liaison"?Number(account.cohort_id):Number(d.cohortId);
- const cohort=db.prepare("SELECT id,name FROM cohorts WHERE id=? AND active=1").get(cohortId);
- if (!cohort) return json(res,400,{error:"请选择有效的培训班"});
- if (!canAccessCohort(account,cohortId)) {
-  const names=account.role==="org"?orgCohorts(account.id).map(cohort=>cohort.name):[];
-  const error=names.length?`该账号没有所选培训班/团校的权限。可登录范围：${names.join("、")}`:"该账号尚未获授权，请联系最高权限管理员。";
-  return json(res,403,{error});
+ if (!account || !await passwordMatches(password,account.password_hash)) return json(res,401,{error:"账号或密码不正确"});
+ const current=activeAccount.get(account.id);
+ if (!current || current.username!==username || current.password_hash!==account.password_hash) {
+  return json(res,401,{error:"账号或密码不正确"});
  }
- const t=randomBytes(32).toString("base64url"), session={expires:Date.now()+SESSION_MS,cohortId,user:account};
+ const now=Date.now(), t=randomBytes(32).toString("base64url"), session={expires:now+SESSION_MS,user:current};
+ setAdminCohort(session,null);
+ sessions.delete(token(req));
+ for (const [key,value] of sessions) if (value.expires<now) sessions.delete(key);
  sessions.set(t,session);
- return json(res,200,{ok:true,dashboard:dashboard(session)},{"Set-Cookie":`pku_admin=${t}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200${secureCookie}`});
+ return json(res,200,adminContext(session),{"Set-Cookie":`pku_admin=${t}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200${secureCookie}`});
 }
-if(req.method==="POST"&&url.pathname==="/api/admin/logout"){sessions.delete(token(req));return json(res,200,{ok:true},{"Set-Cookie":`pku_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureCookie}`})}
+if(req.method==="POST"&&url.pathname==="/api/admin/logout"){
+ const session=adminSession(req);
+ if(session && !adminScopeMatches(res,session,req.headers["x-pku-admin-scope"])) return;
+ sessions.delete(token(req));
+ return json(res,200,{ok:true},{"Set-Cookie":`pku_admin=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureCookie}`});
+}
+if(req.method==="GET"&&url.pathname==="/api/admin/session"){
+ const s=requireIdentity(req,res);
+ if(!s)return;
+ return json(res,200,s.cohortId===null?adminContext(s):dashboard(s));
+}
+if(req.method==="POST"&&url.pathname==="/api/admin/session/cohort"){
+ const d=await body(req,8192), session=requireIdentity(req,res);
+ if(!session || !adminScopeMatches(res,session,req.headers["x-pku-admin-scope"])) return;
+ const cohortId=d?.cohortId;
+ if(!Number.isSafeInteger(cohortId) || cohortId<1) return json(res,400,{error:"请选择培训班/团校"});
+ if(!canAccessCohort(session.user,cohortId)) return json(res,403,{error:"该培训班/团校不在账号的授权范围内"});
+ const saved=sessions.get(token(req));
+ if(saved.cohortId!==cohortId) setAdminCohort(saved,cohortId);
+ return json(res,200,dashboard({...saved,user:session.user}));
+}
 if(req.method==="GET"&&url.pathname==="/api/admin/dashboard"){const s=requireAdmin(req,res);if(!s)return;return json(res,200,dashboard(s))}
 if(req.method==="POST"&&url.pathname==="/api/admin/settings"){
  if(!requireWrite(req,res)) return;
@@ -773,8 +812,8 @@ if(req.method==="POST"&&url.pathname==="/api/admin/import-full"){
  if(!session) return;
  return json(res,200,importTrainingData(session.cohortId,payload));
 }
-if(req.method==="GET"&&url.pathname==="/api/admin/template.xlsx"){const s=requireWrite(req,res);if(!s)return;return binary(res,workbookBuffer(s.cohortId,true),"完整导入模板.xlsx")}
-if(req.method==="GET"&&url.pathname==="/api/admin/export.xlsx"){const s=requireWrite(req,res);if(!s)return;return binary(res,workbookBuffer(s.cohortId,false),`${db.prepare("SELECT name FROM cohorts WHERE id=?").get(s.cohortId).name}-完整数据.xlsx`)}
+if(req.method==="GET"&&url.pathname==="/api/admin/template.xlsx"){const s=requireWrite(req,res,url.searchParams.get("scope")??undefined);if(!s)return;return binary(res,workbookBuffer(s.cohortId,true),"完整导入模板.xlsx")}
+if(req.method==="GET"&&url.pathname==="/api/admin/export.xlsx"){const s=requireWrite(req,res,url.searchParams.get("scope")??undefined);if(!s)return;return binary(res,workbookBuffer(s.cohortId,false),`${activeCohort.get(s.cohortId).name}-完整数据.xlsx`)}
 if(req.method==="GET"&&url.pathname==="/api/admin/accounts"){
  if(!requireSuper(req,res))return;
  const accounts=db.prepare("SELECT a.id,a.username,a.role,a.cohort_id AS cohortId,c.name AS cohortName,a.group_name AS groupName,a.active,a.attendance_policy FROM admin_accounts a LEFT JOIN cohorts c ON c.id=a.cohort_id ORDER BY CASE a.role WHEN 'super' THEN 0 WHEN 'org' THEN 1 ELSE 2 END,a.username").all()

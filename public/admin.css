@@ -165,6 +165,23 @@ input:not([type="checkbox"],[type="radio"],[type="file"]), select {
 .dashboard { max-width: 1380px; }
 .dash-head { margin-bottom: 20px; }
 .dash-head h1 { margin-top: 0; font-family: var(--heading-font); font-size: clamp(1.65rem,3vw,2.15rem); letter-spacing: 0; }
+.dash-actions, #switch-cohort-form, .cohort-item-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dash-actions { justify-content: flex-end; flex-shrink: 0; max-width: 55%; }
+#switch-cohort-form .system-select-control { width: min(260px, 30vw); margin: 0; }
+#switch-cohort-form .system-select-trigger { min-height: 44px; }
+.cohort-item { gap: 12px; }
+.cohort-item-actions { justify-content: flex-end; flex-shrink: 0; }
+#picker-logout { margin-top: 16px; }
+#admin-loading p { margin-bottom: 0; }
+#admin-retry { margin-top: 14px; }
+@media (max-width: 840px) {
+  .dash-head { flex-direction: column; }
+  .dash-actions { max-width: 100%; justify-content: flex-start; }
+  #switch-cohort-form .system-select-control { width: min(260px, 62vw); }
+}
+@media (max-width: 480px) {
+  .cohort-item-actions { flex-direction: column; align-items: stretch; }
+}
 .stat-card { min-width: 0; padding: 12px 16px; border: 1px solid var(--line); border-radius: 4px; box-shadow: none; }
 .stat-card .metric { margin-top: 6px; gap: 8px; flex-wrap: wrap; }
 .stat-card strong { font-family: inherit; font-size: 1.65rem; font-variant-numeric: tabular-nums; }

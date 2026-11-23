@@ -5,7 +5,8 @@ import { readTrainingWorkbook } from "./training-workbook.js";
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const queryCohort=$("#query-cohort"), queryDepartment=$("#department-select"), queryGroup=$("#group-select");
 let queryOptionsVersion=0;
-let data=null, editingStudent=null, accountsData=null, dashboardVersion=0;
+let admin=null, data=null, editingStudent=null, accountsData=null, dashboardVersion=0;
+let restoringAdmin=null, switchingCohort=false;
 const completionStyle=document.createElement("style");completionStyle.textContent=".completion-box{margin:22px 0 4px;padding:18px 20px;background:#faf7f7;border:1px solid #eadcdf;border-radius:12px}.completion-summary{display:flex;align-items:center;justify-content:space-between;gap:18px;font-size:.95rem}.required-earned{color:var(--muted);text-align:right}.required-earned strong{color:var(--ink);font-size:1.05rem}.completion-requirement{margin-top:15px;padding-top:14px;border-top:1px solid #eadcdf;color:var(--red);font-size:1rem;letter-spacing:.01em}@media(max-width:520px){.completion-box{padding:16px}.completion-summary{align-items:flex-start;flex-direction:column;gap:10px}.required-earned{text-align:left}.completion-requirement{line-height:1.8}}";document.head.append(completionStyle);
 $(".admin-tabs").insertAdjacentHTML("beforeend",'<button class="tab-btn" data-tab="cohorts">培训班/团校管理</button>');
 $("#dashboard").insertAdjacentHTML("beforeend",'<section class="panel tab-panel hidden" id="tab-cohorts"><div class="panel-head"><div><h2>培训班/团校管理</h2><p>新增培训班/团校，或修改现有名称。</p></div></div><form id="cohort-form" class="cohort-form"><input type="hidden" name="id"><label>培训班/团校名称<input name="name" maxlength="100" required placeholder="例如：北京大学2026级团支书培训班"></label><button class="primary">保存名称</button><button class="ghost hidden" type="button" id="cohort-cancel">取消编辑</button></form><div id="cohort-list" class="cohort-list"></div></section>');
@@ -13,6 +14,7 @@ $("#stat-grid").insertAdjacentHTML("afterend",'<div id="hypothetical-stat-grid" 
 $(".admin-tabs").insertAdjacentHTML("beforeend",'<button class="tab-btn hidden" id="accounts-tab-btn" data-tab="accounts">账号与权限</button>');
 let cohortList=[];
 const registrationForm=$("#registration-form");
+const groupRequests=new WeakMap();
 function showAuthMessage(message, error=false) {
   const status=$("#auth-message");
   status.textContent=message;
@@ -25,16 +27,18 @@ function switchAuth(mode) {
   registrationForm.classList.toggle("hidden",mode!=="register");
   $$("[data-auth]").forEach(button=>button.setAttribute("aria-pressed",button.dataset.auth===mode));
   showAuthMessage("");
-  if (mode==="register") updateRegistrationScope().catch(error=>showAuthMessage(error.message,true));
+  if (mode==="register") loadMeta();
 }
 
 async function loadGroupOptions(form, selected="") {
   const cohortId=form.elements.cohortId.value;
   const groupSelect=form.elements.groupName;
+  const pending={};
+  groupRequests.set(form,pending);
   groupSelect.replaceChildren(new Option(cohortId?"正在加载小组…":"请先选择培训班/团校",""));
   if (!cohortId) return;
   const {groups=[]}=await request(`/api/meta?cohortId=${encodeURIComponent(cohortId)}`);
-  if (form.elements.cohortId.value!==cohortId) return;
+  if (groupRequests.get(form)!==pending || form.elements.cohortId.value!==cohortId || groupSelect.disabled) return;
   groupSelect.replaceChildren(
     new Option(groups.length?"请选择负责小组":"该培训班/团校暂无小组",""),
     ...groups.map(group=>new Option(group,group))
@@ -66,12 +70,6 @@ registrationForm.onsubmit=async event=>{
     await request("/api/admin/register",{method:"POST",body:JSON.stringify(fields)});
     registrationForm.reset();
     $("#login-form").elements.username.value=fields.username.trim();
-    const firstCohort=fields.cohortId??fields.cohortIds?.[0];
-    if (firstCohort) {
-      const cohort=$("#admin-cohort");
-      cohort.value=String(firstCohort);
-      refreshSelect(cohort);
-    }
     switchAuth("login");
     showAuthMessage("注册申请已提交。审批通过后可登录。");
   } catch(error) {
@@ -82,14 +80,17 @@ registrationForm.onsubmit=async event=>{
 };
 async function request(path,{headers,...options}={}) {
   const requestHeaders={"Content-Type":"application/json",...headers};
-  if(data?.cohort && path.startsWith("/api/admin/") && !["/api/admin/login","/api/admin/logout","/api/admin/register","/api/admin/dashboard"].includes(path)) {
-    requestHeaders["X-PKU-Admin-Scope"]=data.user.id+":"+data.cohort.id;
-  }
+  const scope=path.startsWith("/api/admin/") && !["/api/admin/login","/api/admin/register","/api/admin/session"].includes(path)
+    ? admin?.scope : null;
+  if (scope) requestHeaders["X-PKU-Admin-Scope"]=scope;
   const res=await fetch(path,{...options,headers:requestHeaders});
   const out=await res.json().catch(()=>({}));
   if(!res.ok) {
     const error=new Error(out.error||"操作失败");
     error.status=res.status;
+    if (scope && scope===admin?.scope && (res.status===401 || res.status===428 || out.code==="ADMIN_SCOPE_CHANGED")) {
+      void restoreAdmin();
+    }
     throw error;
   }
   return out;
@@ -141,13 +142,14 @@ async function loadMeta() {
   try {
     const {cohorts}=await request("/api/meta");
     cohortList=cohorts;
-    for (const id of ["#query-cohort","#admin-cohort","#registration-cohort"]) {
+    for (const id of ["#query-cohort","#registration-cohort"]) {
       setCohortOptions($(id),cohortList,"请选择培训班/团校",true);
     }
     setScopeChoices($("#registration-org-scope .cohort-choices"),cohortList);
     if(document.documentElement.dataset.view==="query") await loadDepartments();
-    if(data && activeAdminTab==="cohorts") renderCohorts();
-    if (!$("#registration-form").classList.contains("hidden")) await updateRegistrationScope();
+    if (document.documentElement.dataset.view==="admin" && !registrationForm.classList.contains("hidden")) {
+      await updateRegistrationScope();
+    }
   } catch (error) {
     toast("培训班/团校信息暂时无法加载");
   }
@@ -160,8 +162,7 @@ function switchView() {
     else link.removeAttribute("aria-current");
   });
   if (view==="admin") {
-    if (!cohortList.length) loadMeta();
-    loadDashboard();
+    if (!switchingCohort && !$("#login-form .primary").disabled) restoreAdmin();
   } else loadMeta();
 }
 window.addEventListener("hashchange",switchView);
@@ -208,39 +209,132 @@ $("#login-form").onsubmit=async event=>{
   const submit=form.querySelector("button[type=submit],button.primary");
   submit.disabled=true;
   showAuthMessage("");
+  const version=++dashboardVersion;
   try {
     const result=await request("/api/admin/login",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(form)))});
-    dashboardVersion++;
-    data=result.dashboard;
-    $("#admin-login").classList.add("hidden");
-    $("#dashboard").classList.remove("hidden");
-    selectAdminTab("students",{render:false});
-    render();
     form.elements.password.value="";
-    toast("登录成功");
+    if (version===dashboardVersion) showAdmin(result);
   } catch (error) {
     showAuthMessage(error.message,true);
   } finally {
     submit.disabled=false;
   }
 };
+function showAdmin(result) {
+  if (result.scope!==admin?.scope) resetAdminWorkspace();
+  admin=result;
+  data=result.cohort?result:null;
+  $("#admin-loading").classList.add("hidden");
+  $("#admin-login").classList.add("hidden");
+  $("#admin-cohort-picker").classList.toggle("hidden",!!data);
+  $("#dashboard").classList.toggle("hidden",!data);
+  if (!data) {
+    const hasCohorts=!!admin.cohorts.length;
+    $("#admin-cohort-account").textContent=[admin.user.username,admin.user.roleName,admin.user.groupName].filter(Boolean).join(" · ");
+    setCohortOptions($("#admin-entry-cohort"),admin.cohorts,"请选择培训班/团校",admin.cohorts.length===1);
+    $("#admin-entry-form").classList.toggle("hidden",!hasCohorts);
+    setPickerMessage(hasCohorts?"":"此账号尚无可进入的培训班/团校，请联系最高权限管理员。");
+    if (hasCohorts) refreshSelect($("#admin-entry-cohort")).focus();
+    return;
+  }
+  $(".dash-head h1").textContent=data.cohort.name;
+  $(".dash-head p").textContent=[data.user.username,data.user.roleName,data.user.groupName].filter(Boolean).join(" · ");
+  const switchForm=$("#switch-cohort-form"), select=switchForm.elements.cohortId;
+  switchForm.classList.toggle("hidden",data.cohorts.length<2);
+  setCohortOptions(select,data.cohorts,"请选择培训班/团校");
+  select.value=String(data.cohort.id);
+  refreshSelect(select);
+  updateSwitchButton();
+  for (const id of ["template-download","export-download"]) {
+    const link=document.getElementById(id);
+    const url=new URL(link.href);
+    url.searchParams.set("scope",data.scope);
+    link.href=url;
+  }
+  render();
+}
+function setPickerMessage(message, error=false) {
+  const status=$("#admin-cohort-message");
+  status.textContent=message;
+  status.classList.toggle("hidden",!message);
+  status.classList.toggle("auth-message",error);
+  status.classList.toggle("auth-error",error);
+}
+function restoreAdmin() {
+  if (restoringAdmin) return restoringAdmin;
+  const version=++dashboardVersion;
+  const retry=$("#admin-retry");
+  $("#admin-load-status").textContent="正在检查登录状态…";
+  retry.classList.add("hidden");
+  restoringAdmin=request("/api/admin/session").then(result=>{
+    if (version===dashboardVersion) showAdmin(result);
+  }).catch(error=>{
+    if (version!==dashboardVersion) return;
+    if (error.status===401) showSignedOut();
+    else if (admin || !$("#admin-login").classList.contains("hidden")) toast(error.message);
+    else {
+      $("#admin-load-status").textContent="暂时无法连接服务器。";
+      retry.classList.remove("hidden");
+    }
+  }).finally(()=>{restoringAdmin=null});
+  return restoringAdmin;
+}
+$("#admin-retry").onclick=restoreAdmin;
+
 async function loadDashboard() {
+  if (!data || switchingCohort) return;
   const version=++dashboardVersion;
   try {
     const result=await request("/api/admin/dashboard");
     if (version!==dashboardVersion) return;
-    data=result;
-    $("#admin-login").classList.add("hidden");
-    $("#dashboard").classList.remove("hidden");
-    render();
+    showAdmin(result);
   } catch(error) {
     if (version!==dashboardVersion) return;
-    if (error.status===401) showSignedOut();
-    else toast(error.message);
+    toast(error.message);
   }
 }
+function updateSwitchButton() {
+  const form=$("#switch-cohort-form");
+  const selected=form.elements.cohortId.value;
+  form.querySelector("button[type=submit]").disabled=!selected || String(data?.cohort.id)===selected;
+}
+$("#switch-cohort").onchange=updateSwitchButton;
+async function enterCohort(cohortId) {
+  if (switchingCohort || !cohortId || cohortId===data?.cohort.id) return;
+  switchingCohort=true;
+  const dashboard=$("#dashboard"), picker=$("#admin-cohort-picker");
+  const fromPicker=!data;
+  const version=++dashboardVersion;
+  dashboard.inert=picker.inert=true;
+  setPickerMessage("");
+  if (fromPicker) setPickerMessage("正在进入后台…");
+  try {
+    const result=await request("/api/admin/session/cohort",{method:"POST",body:JSON.stringify({cohortId})});
+    if (version!==dashboardVersion) return;
+    dashboard.inert=picker.inert=false;
+    showAdmin(result);
+    if (document.documentElement.dataset.view==="admin") {
+      window.scrollTo(0,0);
+      $(".dash-head h1").focus({preventScroll:true});
+    }
+    if (!fromPicker) toast("已切换至 "+result.cohort.name);
+  } catch(error) {
+    if (error.status===403) await restoreAdmin();
+    if (fromPicker) setPickerMessage(error.message,true);
+    else toast(error.message);
+  } finally {
+    switchingCohort=false;
+    dashboard.inert=picker.inert=false;
+  }
+}
+for (const id of ["admin-entry-form","switch-cohort-form"]) {
+  document.getElementById(id).onsubmit=event=>{
+    event.preventDefault();
+    void enterCohort(Number(event.currentTarget.elements.cohortId.value));
+  };
+}
 function card(label,s,status="结业"){return`<div class="stat-card"><span class="label">${label}</span><div class="metric"><strong>${s.rate}%</strong><small>${s.passed}/${s.count} 人${status}<br>平均 ${s.average} 学分</small></div></div>`}
-function render(){const s=data.stats;$(".dash-head p").textContent=`${data.cohort?.name||"培训班/团校管理"} · ${data.user.roleName}`;$("#stat-grid").innerHTML=card("总体结业率（满足必修）",s.total)+card("本科生结业率（满足必修）",s.undergraduate)+card("硕博生结业率（满足必修）",s.graduate);$("#settings-form").elements.undergraduate.value=data.thresholds.undergraduate;$("#settings-form").elements.graduate.value=data.thresholds.graduate;$("#settings-form").elements.required.value=data.thresholds.required;$("#accounts-tab-btn").classList.toggle("hidden",!data.user.canManageAccounts);$$('#tab-courses,#tab-settings,#tab-cohorts').forEach(x=>x.classList.toggle('role-hidden',!data.user.canEdit));$$('.tab-btn[data-tab="courses"],.tab-btn[data-tab="settings"],.tab-btn[data-tab="cohorts"]').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$$('#new-student-btn,#template-download,#export-download,.file-btn').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$("#type-chart").innerHTML=`<div class="chart-row"><div class="chart-label"><span>本科生</span><strong>${s.undergraduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.undergraduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><div class="chart-row"><div class="chart-label"><span>硕博生</span><strong>${s.graduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.graduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><p class="muted">另有 ${s.withdrawn} 人已退出／休学，未计入以上人数。</p>`;}
+function render(){const s=data.stats;$("#stat-grid").innerHTML=card("总体结业率（满足必修）",s.total)+card("本科生结业率（满足必修）",s.undergraduate)+card("硕博生结业率（满足必修）",s.graduate);$("#settings-form").elements.undergraduate.value=data.thresholds.undergraduate;$("#settings-form").elements.graduate.value=data.thresholds.graduate;$("#settings-form").elements.required.value=data.thresholds.required;$("#accounts-tab-btn").classList.toggle("hidden",!data.user.canManageAccounts);$$('#tab-courses,#tab-settings,#tab-cohorts').forEach(x=>x.classList.toggle('role-hidden',!data.user.canEdit));$$('.tab-btn[data-tab="courses"],.tab-btn[data-tab="settings"],.tab-btn[data-tab="cohorts"]').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$$('#new-student-btn,#template-download,#export-download,.file-btn').forEach(x=>x.classList.toggle('hidden',!data.user.canEdit));$("#type-chart").innerHTML=`<div class="chart-row"><div class="chart-label"><span>本科生</span><strong>${s.undergraduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.undergraduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><div class="chart-row"><div class="chart-label"><span>硕博生</span><strong>${s.graduate.count} 人</strong></div><div class="chart-bar"><i style="width:${s.graduate.count*100/Math.max(s.total.count,1)}%"></i></div></div><p class="muted">另有 ${s.withdrawn} 人已退出／休学，未计入以上人数。</p>`;}
 function renderStudents(){const q=$("#student-search").value.trim().toLowerCase(),show=$("#show-withdrawn").checked;const rows=data.records.filter(r=>(show||!r.withdrawn)&&(!q||[r.name,r.department,r.groupName,r.groupContact].some(x=>String(x).toLowerCase().includes(q))));$("#student-count").textContent=`显示 ${rows.length} / ${data.records.length} 人`;$("#students-body").innerHTML=rows.length?rows.map(r=>`<tr class="${r.withdrawn?'withdrawn-row':''}"><td><strong>${esc(r.name)}</strong></td><td>${esc(r.department)}</td><td>${esc(r.groupName||'—')}</td><td>${typeName(r.studentType)}</td><td><strong>${r.totalCredits}</strong></td><td>${r.requiredCredits}</td><td>${r.courseCount}</td><td><span class="status ${r.withdrawn?'pending':'pass'}">${r.withdrawn?'已退出／休学':'在班'}</span></td><td><span class="status ${r.completed?'pass':'pending'}">${r.completed?'已结业':'未结业'}</span></td><td class="row-actions"><button class="small-btn primary-link" data-attendance="${r.id}">课程记录</button>${data.user.canEdit?`<button class="small-btn" data-edit-student="${r.id}">编辑</button><button class="delete-btn" data-delete-student="${r.id}">删除</button>`:''}</td></tr>`).join(""):'<tr><td colspan="10" class="empty-cell">暂无匹配学员</td></tr>'}
 function renderCourses(){$("#courses-body").innerHTML=(data.courses.filter(c=>c.active).map(c=>`<tr><td>${c.sortOrder}</td><td><strong>${esc(c.name)}</strong></td><td><span class="course-type ${c.category}">${categoryName(c.category)}</span></td><td>${c.credits}</td><td class="row-actions"><button class="small-btn primary-link" data-course-roster="${c.id}">登记出勤</button><button class="small-btn" data-edit-course="${c.id}">编辑</button><button class="delete-btn" data-delete-course="${c.id}">停用</button></td></tr>`).join("")||'<tr><td colspan="5" class="empty-cell">暂无课程</td></tr>')}
 let activeAdminTab="students";
@@ -269,35 +363,59 @@ function renderAdminPanel() {
 function renderCohorts() {
   const box=$("#cohort-list"), form=$("#cohort-form");
   if (!box) return;
-  const org=data?.user.role==="org";
-  const allowed=new Set(data?.user.cohortIds??[]);
-  const cohorts=org?cohortList.filter(cohort=>allowed.has(cohort.id)):cohortList;
+  const org=data.user.role==="org";
   $("#tab-cohorts .panel-head p").textContent=org
-    ?"可修改已授权的培训班/团校名称。"
-    :"新增培训班/团校，或修改现有名称。";
+    ?"可进入已授权的培训班/团校，并修改名称。"
+    :"可进入任一培训班/团校，也可新增或修改名称。";
   form.classList.toggle("hidden",org && !form.elements.id.value);
-  box.innerHTML=cohorts.map(cohort=>`<div class="cohort-item"><div>
-    <strong>${esc(cohort.name)}</strong>${data?.cohort?.id===cohort.id?'<small>当前管理</small>':""}
-    </div><button class="small-btn" data-edit-cohort="${cohort.id}">修改名称</button></div>`
-  ).join("");
+  box.innerHTML=data.cohorts.map(cohort=>{
+    const current=data.cohort.id===cohort.id;
+    return `<div class="cohort-item"><div><strong>${esc(cohort.name)}</strong>
+      ${current?'<small>当前管理</small>':""}</div><div class="cohort-item-actions">
+      ${current?"":`<button class="small-btn primary-link" data-open-cohort="${cohort.id}">进入后台</button>`}
+      <button class="small-btn" data-edit-cohort="${cohort.id}">修改名称</button></div></div>`;
+  }).join("");
 }
-$("#cohort-list").onclick=e=>{const id=Number(e.target.dataset.editCohort);if(!id)return;const c=cohortList.find(x=>x.id===id),f=$("#cohort-form");f.classList.remove("hidden");f.elements.id.value=c.id;f.elements.name.value=c.name;$("#cohort-cancel").classList.remove("hidden");f.elements.name.focus()};
-$("#cohort-cancel").onclick=()=>{$("#cohort-form").reset();$("#cohort-form").elements.id.value="";$("#cohort-cancel").classList.add("hidden");renderCohorts()};
+$("#cohort-list").onclick=event=>{
+  const open=Number(event.target.dataset.openCohort);
+  if (open) return void enterCohort(open);
+  const cohort=data.cohorts.find(item=>item.id===Number(event.target.dataset.editCohort));
+  if (!cohort) return;
+  const form=$("#cohort-form");
+  form.classList.remove("hidden");
+  form.elements.id.value=cohort.id;
+  form.elements.name.value=cohort.name;
+  $("#cohort-cancel").classList.remove("hidden");
+  form.elements.name.focus();
+};
+function resetCohortEditor() {
+  const form=$("#cohort-form");
+  form.reset();
+  form.elements.id.value="";
+  $("#cohort-cancel").classList.add("hidden");
+}
+$("#cohort-cancel").onclick=()=>{resetCohortEditor();renderCohorts()};
 $("#cohort-form").onsubmit=async event=>{
   event.preventDefault();
   const form=event.currentTarget;
   await submitOnce(event,async()=>{
     await request("/api/admin/cohorts",{method:"POST",body:JSON.stringify(Object.fromEntries(new FormData(form)))});
-    form.reset();
-    $("#cohort-cancel").classList.add("hidden");
-    await Promise.all([loadMeta(),loadDashboard()]);
+    resetCohortEditor();
+    await loadDashboard();
     toast("培训班/团校已保存");
   });
 };
 $("#student-search").oninput=renderStudents;$("#show-withdrawn").onchange=renderStudents;
-function showSignedOut() {
-  dashboardVersion++;
-  data=null;
+function resetAdminWorkspace() {
+  selectAdminTab("students",{render:false});
+  $("#student-search").value="";
+  $("#show-withdrawn").checked=true;
+  $("#completion-department").value="";
+  $("#account-search").value="";
+  $("#account-role-filter").value="";
+  $("#account-cohort-filter").value="";
+  resetCohortEditor();
+  editingStudent=null;
   accountsData=null;
   selectedLiaisonIds.clear();
   permissionForm.reset();
@@ -307,15 +425,29 @@ function showSignedOut() {
   $("#registration-count").textContent="";
   resetAccountEditor();
   for (const dialog of $$("dialog[open]")) dialog.close();
+}
+function showSignedOut() {
+  dashboardVersion++;
+  if (admin) {
+    resetAdminWorkspace();
+    switchAuth("login");
+  }
+  admin=data=null;
+  $("#admin-loading").classList.add("hidden");
+  $("#admin-cohort-picker").classList.add("hidden");
   $("#dashboard").classList.add("hidden");
   $("#admin-login").classList.remove("hidden");
 }
-$("#logout-btn").onclick=async()=>{
+$("#logout-btn").onclick=$("#picker-logout").onclick=async event=>{
+  const button=event.currentTarget;
+  button.disabled=true;
   try {
     await request("/api/admin/logout",{method:"POST",body:"{}"});
     showSignedOut();
   } catch(error) {
     toast(error.message);
+  } finally {
+    button.disabled=false;
   }
 };
 
@@ -334,7 +466,7 @@ $("#student-form").onsubmit=async event=>{
   });
 };
 
-function openCourse(c=null){const f=$("#course-form");f.reset();f.elements.sortOrder.value=c?.sortOrder??data.courses.length+1;if(c)for(const[k,v]of Object.entries(c))if(f.elements[k])f.elements[k].value=v??"";$("#course-dialog").showModal()}
+function openCourse(c=null){const f=$("#course-form");f.reset();f.elements.id.value=c?.id??"";f.elements.sortOrder.value=c?.sortOrder??data.courses.length+1;if(c)for(const[k,v]of Object.entries(c))if(f.elements[k])f.elements[k].value=v??"";$("#course-dialog").showModal()}
 $("#new-course-btn").onclick=()=>openCourse();
 $("#course-form").onsubmit=async event=>{
   event.preventDefault();
@@ -405,8 +537,10 @@ async function saveAttendanceChanges(event, path, payload, dialog, success) {
 }
 
 async function openAttendance(id) {
+  const scope=data.scope;
   try {
     const record=await request("/api/admin/students/"+id);
+    if (scope!==data?.scope || switchingCohort) return;
     const form=$("#attendance-form"), policy=attendancePolicyFor(data.user,record.attendancePolicy);
     form.elements.studentId.value=id;
     $("#attendance-title").textContent=record.student.name+"的课程记录";
@@ -590,11 +724,11 @@ permissionForm.onsubmit=async event=>{
 };
 
 async function loadAccounts() {
-  const accountId=data?.user.id;
+  const scope=data?.scope;
   const [accounts,registrations]=await Promise.allSettled([
     request("/api/admin/accounts"), request("/api/admin/registrations")
   ]);
-  if (!data?.user?.canManageAccounts || data.user.id!==accountId) return;
+  if (!data?.user?.canManageAccounts || data.scope!==scope) return;
   if (accounts.status==="fulfilled") {
     accountsData=accounts.value;
     const liaisonIds=new Set(accountsData.accounts.filter(account=>account.role==="liaison"&&account.active).map(account=>account.id));
@@ -800,13 +934,13 @@ $("#full-excel-input").onchange=async event=>{
   try {
     const [spreadsheet,buffer]=await Promise.all([loadSpreadsheet(),file.arrayBuffer()]);
     const payload=readTrainingWorkbook(spreadsheet.read(buffer,{type:"array"}),spreadsheet);
-    if (data?.cohort?.id!==actor.cohort.id || data?.user?.id!==actor.user.id) return toast("管理范围已变化，请重新选择文件");
+    if (data?.scope!==actor.scope || switchingCohort) return toast("管理范围已变化，请重新选择文件");
     const message="将导入 "+payload.students.length+" 名学员、"+payload.courses.length+" 门课程和 "+
       payload.attendance.length+" 条出勤记录。匹配学员在表内课程的出勤将重新登记，表外课程的出勤会保留。"+
       (payload.thresholds?" 结业门槛也会按文件更新。":"");
     if(!confirm(message)) return;
     const result=await request("/api/admin/import-full",{method:"POST",body:JSON.stringify(payload)});
-    await Promise.all([loadDashboard(),loadMeta()]);
+    await loadDashboard();
     toast("已导入 "+result.students+" 名学员和 "+result.attendance+" 条出勤记录");
   } catch(error) {
     toast(error.message);
@@ -1249,9 +1383,11 @@ renderCourses=function(){
 $("#courses-body").onclick=async e=>{const edit=e.target.dataset.editCourse,remove=e.target.dataset.deleteCourse,roster=e.target.dataset.courseRoster;if(edit)openCourse(data.courses.find(c=>c.id===Number(edit)));if(roster)openCourseRoster(Number(roster));if(remove&&confirm("停用后，该课程不再计入任何学员总学分。确定继续吗？")){await request(`/api/admin/courses/${remove}`,{method:"DELETE"});await loadDashboard();toast("课程已停用")}};
 
 async function openCourseRoster(id) {
+  const scope=data.scope;
   try {
     const path="/api/admin/courses/"+id+"/attendance";
     const roster=await request(path), {course,students}=roster;
+    if (scope!==data?.scope || switchingCohort) return;
     const policy=attendancePolicyFor(data.user,roster.attendancePolicy);
     const manager=policy.mode==="manager";
     let dialog=$("#course-roster-dialog");
@@ -1312,7 +1448,7 @@ async function openCourseRoster(id) {
       const status=button.dataset.batchStatus;
       list.querySelectorAll(".roster-check:checked").forEach(input=>{
         const select=input.closest(".attendance-row").querySelector("select");
-        if (!Array.from(select.options).some(option=>option.value===status)) return;
+        if (select.value===status || !Array.from(select.options).some(option=>option.value===status)) return;
         select.value=status;
         select.dispatchEvent(new Event("change",{bubbles:true}));
       });
@@ -1341,7 +1477,8 @@ function renderGuide() {
   const sections=[`
     <div class="guide-step">
       <h3>查看统计与学员记录</h3>
-      <p>登录时选择培训班/团校。首页统计不包含退出或休学学员。进入“学员与学分”，可按姓名、院系或组别搜索，点击“课程记录”查看每门课的出勤和学分。</p>
+      <p>用账号和密码登录后，选择已授权的培训班/团校并点击“进入后台”。若有多个培训班/团校的权限，可在后台顶部切换。首页统计不包含退出或休学学员。</p>
+      <p>在“学员与学分”可按姓名、院系或组别搜索，点击“课程记录”查看每门课的出勤和学分。</p>
     </div>`];
 
   if (user.role==="liaison") {
@@ -1360,7 +1497,7 @@ function renderGuide() {
       </div>
       <div class="guide-step">
         <h3>培训班/团校与结业</h3>
-        <p>在“培训班/团校管理”可以修改已授权培训班/团校的名称。进入“结业设置”填写本科、硕博总学分及必修学分门槛，再到“结业统计”查看总览、院系对比或未结业学员差距。</p>
+        <p>在“培训班/团校管理”可以进入已授权的培训班/团校，也可以修改名称。进入“结业设置”填写本科、硕博总学分及必修学分门槛，再到“结业统计”查看总览、院系对比或未结业学员差距。</p>
       </div>`);
     if (user.role==="super") {
       sections.push(`

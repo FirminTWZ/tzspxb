@@ -72,10 +72,11 @@ async function launch(directory) {
 }
 
 function client(origin) {
-  let cookie="";
+  let cookie="", scope="";
   return async (path,{method="GET",body,status=200,inspect=false,headers={}}={})=>{
     const response=await fetch(origin+path,{
-      method,headers:{"Content-Type":"application/json",cookie,...headers},
+      method,headers:{"Content-Type":"application/json",cookie,
+        ...(scope?{"X-PKU-Admin-Scope":scope}:{}),...headers},
       body:body===undefined?undefined:JSON.stringify(body)
     });
     const token=response.headers.get("set-cookie");
@@ -83,7 +84,9 @@ function client(origin) {
     const error=(response.status===status)?"":await response.text();
     assert.equal(response.status,status,method+" "+path+" "+error);
     if(inspect) return response;
-    return response.json();
+    const result=await response.json();
+    if(response.ok && result.scope) scope=result.scope;
+    return result;
   };
 }
 
@@ -125,8 +128,13 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   service=await launch(directory);
   const {origin}=service;
   const admin=client(origin), org=client(origin), liaison=client(origin), peer=client(origin), other=client(origin), visitor=client(origin);
-  const login=(user,username,cohortId=1,status=200)=>user("/api/admin/login",{method:"POST",body:{username,password,cohortId},status});
   const write=(user,path,body,status=200)=>user(path,{method:"POST",body,status});
+  const signIn=(user,username,status=200)=>write(user,"/api/admin/login",{username,password},status);
+  const enter=(user,cohortId,status=200)=>write(user,"/api/admin/session/cohort",{cohortId},status);
+  const login=async (user,username,cohortId=1)=>{
+    await signIn(user,username);
+    return enter(user,cohortId);
+  };
   const editPermissions=(user,body,status=200)=>user("/api/admin/liaison-attendance",{method:"PATCH",body,status});
   const accounts=async ()=>(await admin("/api/admin/accounts")).accounts;
   const coursePath=id=>"/api/admin/courses/"+id+"/attendance";
@@ -143,7 +151,25 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   await visitor("/attendance-policy.js",{inspect:true});
   await visitor("/vendor/",{status:404,inspect:true});
   await visitor("/api/admin/accounts",{status:401});
-  await login(admin,"test-super");
+  await visitor("/api/admin/session",{status:401});
+  await enter(visitor,1,401);
+  const signedIn=await signIn(admin,"test-super");
+  assert.equal(signedIn.cohort,null);
+  assert.equal(signedIn.user.role,"super");
+  assert.equal(signedIn.records,undefined);
+  assert.deepEqual(signedIn.cohorts.map(cohort=>cohort.id),[1]);
+  assert.equal((await admin("/api/admin/session")).cohort,null);
+  await admin("/api/admin/dashboard",{status:428});
+  await admin("/api/admin/accounts",{status:428});
+  await write(admin,"/api/admin/settings",{undergraduate:99,graduate:99,required:99},428);
+  await enter(admin,"1",400);
+  await enter(admin,999999,403);
+  const firstSession=await enter(admin,1);
+  assert.equal((await admin("/api/admin/session")).scope,firstSession.scope);
+  assert.deepEqual(firstSession.records[0].progress,{
+    studiedCourses:1,remainingRequired:0,minimumCourses:null,
+    totalEnoughRequiredShort:false,canGraduateWithRequiredOnly:false
+  });
   const original=await admin(studentPath(5));
   assert.equal(original.student.totalCredits,2);
   assert.equal(original.attendance[0].sourceMark,"旧版记录");
@@ -169,22 +195,37 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   await write(admin,"/api/admin/accounts",{username:"test-org",password,role:"org",cohortIds:[1]});
   await write(admin,"/api/admin/accounts",{username:"wrong-group",password,role:"liaison",cohortId:1,groupName:"不存在"},400);
 
-  await login(admin,"test-super",second);
-  const idAtSecond=(await dashboard(admin)).user.id;
+  const atSecond=await enter(admin,second);
+  assert.equal(atSecond.cohort.id,second);
+  assert.notEqual(atSecond.scope,firstSession.scope);
+  assert.ok(atSecond.cohorts.some(cohort=>cohort.id===1));
+  assert.deepEqual(atSecond.records,[]);
   await admin("/api/admin/settings",{method:"POST",body:{undergraduate:99,graduate:99,required:99},
-    headers:{"X-PKU-Admin-Scope":idAtSecond+":1"},status:409});
+    headers:{"X-PKU-Admin-Scope":firstSession.scope},status:409});
+  await admin("/api/admin/export.xlsx?scope="+firstSession.scope,{status:409});
   assert.equal((await dashboard(admin)).thresholds.undergraduate,10);
   const elsewhere=(await write(admin,"/api/admin/students",student("示例甲","一组"))).id;
   assert.notEqual(elsewhere,first);
   await write(admin,"/api/admin/courses",{courseKey:"elsewhere",name:"异班课程",category:"required",credits:3,sortOrder:1});
   const crossCourse=(await dashboard(admin)).courses[0].id;
   await createLiaison("liaison-other",second,"一组");
-  await login(admin,"test-super");
+  const returned=await enter(admin,1);
+  assert.notEqual(returned.scope,firstSession.scope);
+  assert.equal(returned.thresholds.undergraduate,3);
+  assert.deepEqual(returned.records.find(row=>row.id===first).progress,{
+    studiedCourses:0,remainingRequired:2,minimumCourses:1,
+    totalEnoughRequiredShort:false,canGraduateWithRequiredOnly:true
+  });
+  await admin("/api/admin/dashboard",{headers:{"X-PKU-Admin-Scope":firstSession.scope},status:409});
   await write(admin,"/api/admin/cohorts",{name:"测试团校 B"},409);
   await write(admin,"/api/admin/courses",{id:crossCourse,name:"越界课程",category:"required",credits:2,sortOrder:1},404);
   await admin("/api/admin/courses/"+crossCourse,{method:"DELETE",status:404});
-  await login(org,"test-org");
-  await login(liaison,"liaison-one");
+  assert.deepEqual((await signIn(org,"test-org")).cohorts.map(cohort=>cohort.id),[1]);
+  await enter(org,second,403);
+  await enter(org,1);
+  assert.deepEqual((await signIn(liaison,"liaison-one")).cohorts.map(cohort=>cohort.id),[1]);
+  await enter(liaison,second,403);
+  await enter(liaison,1);
   await login(peer,"liaison-two");
   await login(other,"liaison-other",second);
   const byName=Object.fromEntries((await accounts()).map(account=>[account.username,account.id]));
@@ -286,13 +327,24 @@ test("migration, attendance permissions, scopes and manager workflows",async t=>
   await admin(studentPath(teammate),{method:"DELETE"});
   await admin(studentPath(teammate),{status:404});
 
-  await login(org,"test-org",second,403);
+  await enter(org,second,403);
   await write(admin,"/api/admin/accounts",{id:byName["test-org"],username:"test-org",role:"org",cohortIds:[1,second]});
-  await login(org,"test-org",second);
+  assert.deepEqual((await org("/api/admin/session")).cohorts.map(cohort=>cohort.id),[second,1]);
+  assert.deepEqual((await enter(org,second)).records.map(row=>row.id),[elsewhere]);
   await write(admin,"/api/admin/accounts",{id:byName["test-org"],username:"test-org",role:"org",cohortIds:[1]});
-  await org("/api/admin/dashboard",{status:401});
+  await org("/api/admin/dashboard",{status:409});
+  assert.equal((await org("/api/admin/session")).cohort,null);
+  await org("/api/admin/dashboard",{status:428});
+  assert.equal((await enter(org,1)).cohort.id,1);
+  await write(admin,"/api/admin/accounts",{id:byName["test-org"],username:"test-org",role:"org",cohortIds:[]});
+  const noGrants=await org("/api/admin/session");
+  assert.equal(noGrants.cohort,null);
+  assert.deepEqual(noGrants.cohorts,[]);
+  await enter(org,1,403);
+  await write(org,"/api/admin/logout",{});
+  await org("/api/admin/session",{status:401});
   await admin("/api/admin/accounts/"+byName["test-org"],{method:"DELETE"});
-  await login(org,"test-org",1,401);
+  await signIn(org,"test-org",401);
 
   await write(admin,"/api/admin/cohorts",{id:1,name:"已改名测试培训班"});
   await service.stop();
